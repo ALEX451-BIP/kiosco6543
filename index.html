@@ -5210,6 +5210,7 @@
                     try {
                         const prod = findProductoPorCodigo(code);
                         if (prod) {
+                            agregarAlCarrito(prod.id);
                             mostrarProducto(prod);
                             if (currentScannerModal) {
                                 if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
