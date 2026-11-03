@@ -2911,6 +2911,30 @@
         // ========================================================================
         //  HANDLE SCANNED CODE UNIVERSAL (VERSIÓN MEJORADA)
         // ========================================================================
+        function normalizarCodigoParaMatch(c) {
+            if (c === null || c === undefined) return null;
+            let s = String(c).trim().replace(/[\s\-_]/g, "");
+            if (!s) return null;
+            const n = s.replace(/^0+(?=\d)/, "");
+            return { raw: s, num: n };
+        }
+
+        function findProductoPorCodigo(code) {
+            const c = normalizarCodigoParaMatch(code);
+            if (!c) return null;
+            let p = null;
+            for (let i = 0; i < productos.length; i++) {
+                const pc = normalizarCodigoParaMatch(productos[i] && productos[i].codigo);
+                if (pc && pc.raw === c.raw) { p = productos[i]; break; }
+            }
+            if (p) return p;
+            for (let i = 0; i < productos.length; i++) {
+                const pc = normalizarCodigoParaMatch(productos[i] && productos[i].codigo);
+                if (pc && pc.num === c.num) { p = productos[i]; break; }
+            }
+            return p;
+        }
+
         async function handleScannedCodeUniversal(code, modal = null) {
             const now = Date.now();
             if (code === lastScannedCode && (now - lastScannedTime) < 2000) {
@@ -2920,12 +2944,10 @@
             lastScannedCode = code;
             lastScannedTime = now;
 
-            let producto = productos.find(p => p.codigo === code);
-            if (!producto && barcodeCache[code]) {
-                producto = productos.find(p => p.codigo === code || p.nombre === barcodeCache[code].nombre);
-                if (!producto && barcodeCache[code].productoId) {
-                    producto = productos.find(p => p.id == barcodeCache[code].productoId);
-                }
+            let producto = findProductoPorCodigo(code);
+            if (!producto && barcodeCache['code_' + code]) {
+                const ent = barcodeCache['code_' + code];
+                producto = productos.find(p => p && (p.codigo === ent.valor || p.nombre === ent.nombre)) || (ent.productoId ? productos.find(p => p && p.id == ent.productoId) : null);
             }
 
             // Si el código ya existe → agregar al carrito
@@ -5186,7 +5208,7 @@
                 const originalHandler = window.handleScannedCodeUniversal;
                 window.handleScannedCodeUniversal = function(code, modal) {
                     try {
-                        const prod = productos.find(p => p.codigo === code);
+                        const prod = findProductoPorCodigo(code);
                         if (prod) {
                             mostrarProducto(prod);
                             if (currentScannerModal) {
