@@ -18,6 +18,7 @@
     10. CSV escapado con csvField() en exportaciones
     11. Filtro de movimientos incluye tarjeta/QR, columnas muestran iconos correctos
     12. NUEVO: Modal con micrófono para agregar productos al escanear códigos nuevos
+    13. NUEVO: Separación automática de cigarrillos en pago mixto (desglose en caja y ticket)
     -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js">
     </script>
@@ -29,7 +30,6 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js">
     </script>
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
         /* ===== RESET & BASE ===== */
         * {
@@ -343,31 +343,39 @@
         .tabs-wrapper {
             display: flex;
             overflow-x: auto;
-            gap: 4px;
-            padding: 16px 20px 0;
+            gap: 2px;
+            padding: 14px 20px 0;
             background: var(--surface);
             border-bottom: 2px solid var(--border);
-            scrollbar-width: none;
+            scrollbar-width: thin;
+            scrollbar-color: var(--primary) transparent;
+            -webkit-mask: linear-gradient(90deg, transparent 4px, #000 20px, #000 calc(100% - 20px), transparent calc(100% - 4px));
+            mask: linear-gradient(90deg, transparent 4px, #000 20px, #000 calc(100% - 20px), transparent calc(100% - 4px));
         }
         .tabs-wrapper::-webkit-scrollbar {
-            display: none;
+            height: 3px;
+        }
+        .tabs-wrapper::-webkit-scrollbar-thumb {
+            background: var(--primary);
+            border-radius: 3px;
         }
 
         .tab-btn {
             background: transparent;
             border: none;
-            padding: 12px 22px;
+            padding: 10px 14px;
             font-family: 'DM Sans', sans-serif;
-            font-weight: 700;
-            font-size: 0.95rem;
-            letter-spacing: 0.06em;
+            font-weight: 600;
+            font-size: 0.78rem;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
-            border-radius: 12px 12px 0 0;
+            border-radius: 10px 10px 0 0;
             cursor: pointer;
             color: var(--text-muted);
             white-space: nowrap;
             transition: all 0.2s;
             position: relative;
+            flex-shrink: 0;
         }
         .tab-btn:hover {
             color: var(--text);
@@ -1763,6 +1771,8 @@
         <div id="carteleria" class="tab-content"></div>
         <div id="etiquetas" class="tab-content"></div>
         <div id="codigos" class="tab-content"></div>
+        <div id="cigarrillos" class="tab-content"></div>
+        <div id="sube" class="tab-content"></div>
     </div>
 
     <!-- BOTTOM BAR -->
@@ -1867,6 +1877,17 @@
         var etiquetasGuardadas = [];
         var plantillasCarteles = [];
         var barcodeCache = {};
+        var cigCaja = {
+            apertura: null,
+            montoAperturaEfectivo: 0, montoAperturaTransferencia: 0,
+            efectivo: 0, transferencia: 0,
+            movimientos: [], cierres: [],
+            transferenciasACajaGeneral: [],
+            cerradaEn: null
+        };
+        var cigCompras = [];
+        var cigMovimientosStock = [];
+        var subeCargas = [];
         var caja = {
             apertura: null,
             montoAperturaEfectivo: 0,
@@ -1874,7 +1895,8 @@
             efectivo: 0,
             transferencia: 0,
             movimientos: [],
-            cierres: []
+            cierres: [],
+            cerradaEn: null
         };
         var sesiones = {
             "caja1": { id: "caja1", nombre: "👤 Caja 1", items: [], descuento: { tipo: null, valor: 0 } },
@@ -1900,6 +1922,13 @@
         const diasSemana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
         var userMode = "admin";
         var currentEmployeeId = null;
+
+        function esProductoCigarrillo(prod) {
+            if (!prod) return false;
+            if (prod.esCigarrillo) return true;
+            let cat = categorias.find(c => c.id === prod.categoriaId);
+            return cat && cat.nombre.toLowerCase().includes('cigarrillo');
+        }
 
         var lineChartVentas = null,
             dualAxisChart = null,
@@ -2037,7 +2066,6 @@
                 }
             }
             if (unicos.length !== empleados.length) {
-                console.log(`🧹 Duplicados eliminados: ${empleados.length - unicos.length}`);
                 empleados = unicos;
             }
         }
@@ -2099,6 +2127,10 @@
                 const tabId = btn.dataset.tab;
                 if (userMode === "empleado" && tabsAdmin.includes(tabId)) btn.style.display = "none";
                 else btn.style.display = "inline-flex";
+            });
+            // Mostrar tabs cigarrillos y sube siempre visibles
+            document.querySelectorAll('.tab-btn[data-tab="cigarrillos"], .tab-btn[data-tab="sube"]').forEach(btn => {
+                btn.style.display = "inline-flex";
             });
             if (userMode === "empleado") {
                 const activeTab = document.querySelector('.tab-content.active')?.id;
@@ -2256,7 +2288,7 @@
             t.innerText = (error ? "⚠️ " : "✅ ") + msg;
             t.style.background = error ? "#dc2626" : "var(--primary)";
             t.style.opacity = "1";
-            setTimeout(() => { if (t) t.style.opacity = "0"; }, 2500);
+            setTimeout(() => { if (t) t.style.opacity = "0"; }, 3500);
         }
 
         async function playSound() {
@@ -2359,6 +2391,11 @@
             if (turnoActivo) localStorage.setItem(PREF + 'turnoActivo', JSON.stringify(turnoActivo));
             else localStorage.removeItem(PREF + 'turnoActivo');
             guardarEmpleadosTurnos();
+            // Guardar datos cigarrillos
+            saveCigCaja();
+            saveCigCompras();
+            saveCigMovimientosStock();
+            localStorage.setItem(PREF + 'subeCargas', JSON.stringify(subeCargas));
             actualizarHeader();
             actualizarContadorAvisos();
             localStorage.setItem('zoomLevel', config.zoomLevel);
@@ -2557,6 +2594,13 @@
             });
             if (venta.descuento && venta.descuento.valor > 0) contenido +=
                 `<tr><td colspan="2"><hr/></td></tr><tr><td colspan="2">Descuento</td><td align="right">-${venta.descuento.tipo==='porcentaje'?venta.descuento.valor+'%':'$'+venta.descuento.valor}</td>`;
+            // 🔥 DESGLOSE DE CIGARRILLOS EN EL TICKET
+            if (venta.desglose && venta.desglose.cigarrillos > 0) {
+                contenido +=
+                    `<tr><td colspan="2"><hr/></td></tr><tr><td>🚬 Cigarrillos</td><td align="right">$${venta.desglose.cigarrillos.toFixed(2)}</td></tr>`;
+                contenido +=
+                    `<tr><td>🛒 Resto</td><td align="right">$${venta.desglose.resto.toFixed(2)}</td></tr>`;
+            }
             contenido +=
                 `<tr><td colspan="2"><hr/></td></tr><tr><td><strong>Total</strong></td><td align="right"><strong>$${venta.total}</strong></td></tr></table><p style="text-align:center;">¡Gracias!</p></div>`;
             let ventana = window.open("", "_blank");
@@ -2739,6 +2783,9 @@
                         <select id="nuevoCategoria" style="font-size:1rem;">
                             ${categorias.map(c => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`).join('')}
                         </select>
+                        <label style="display:flex; align-items:center; gap:8px; margin-top:8px; cursor:pointer;">
+                            <input type="checkbox" id="nuevoEsCigarrillo"> 🚬 Es cigarrillo
+                        </label>
                         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
                             <button id="nuevoGuardarBtn" class="btn btn-primary">✅ Guardar producto</button>
                             <button id="nuevoGuardarCarritoBtn" class="btn btn-success">✅ Guardar y agregar al carrito</button>
@@ -2812,6 +2859,7 @@
                     const marca = modal.querySelector('#nuevoMarca').value.trim();
                     const alias = modal.querySelector('#nuevoAlias').value.trim();
                     const sinonimos = modal.querySelector('#nuevoSinonimos').value.trim();
+                    const esCigarrillo = modal.querySelector('#nuevoEsCigarrillo').checked;
 
                     if (!nombre) { toast('❌ El nombre es obligatorio', true); return; }
                     if (isNaN(precio) || precio <= 0) { toast('❌ Precio inválido', true); return; }
@@ -2844,7 +2892,8 @@
                         presentacion: '',
                         contenido: '',
                         alias,
-                        sinonimos
+                        sinonimos,
+                        esCigarrillo
                     };
 
                     productos.push(nuevoProducto);
@@ -2911,30 +2960,6 @@
         // ========================================================================
         //  HANDLE SCANNED CODE UNIVERSAL (VERSIÓN MEJORADA)
         // ========================================================================
-        function normalizarCodigoParaMatch(c) {
-            if (c === null || c === undefined) return null;
-            let s = String(c).trim().replace(/[\s\-_]/g, "");
-            if (!s) return null;
-            const n = s.replace(/^0+(?=\d)/, "");
-            return { raw: s, num: n };
-        }
-
-        function findProductoPorCodigo(code) {
-            const c = normalizarCodigoParaMatch(code);
-            if (!c) return null;
-            let p = null;
-            for (let i = 0; i < productos.length; i++) {
-                const pc = normalizarCodigoParaMatch(productos[i] && productos[i].codigo);
-                if (pc && pc.raw === c.raw) { p = productos[i]; break; }
-            }
-            if (p) return p;
-            for (let i = 0; i < productos.length; i++) {
-                const pc = normalizarCodigoParaMatch(productos[i] && productos[i].codigo);
-                if (pc && pc.num === c.num) { p = productos[i]; break; }
-            }
-            return p;
-        }
-
         async function handleScannedCodeUniversal(code, modal = null) {
             const now = Date.now();
             if (code === lastScannedCode && (now - lastScannedTime) < 2000) {
@@ -2944,10 +2969,12 @@
             lastScannedCode = code;
             lastScannedTime = now;
 
-            let producto = findProductoPorCodigo(code);
-            if (!producto && barcodeCache['code_' + code]) {
-                const ent = barcodeCache['code_' + code];
-                producto = productos.find(p => p && (p.codigo === ent.valor || p.nombre === ent.nombre)) || (ent.productoId ? productos.find(p => p && p.id == ent.productoId) : null);
+            let producto = productos.find(p => p.codigo === code);
+            if (!producto && barcodeCache[code]) {
+                producto = productos.find(p => p.codigo === code || p.nombre === barcodeCache[code].nombre);
+                if (!producto && barcodeCache[code].productoId) {
+                    producto = productos.find(p => p.id == barcodeCache[code].productoId);
+                }
             }
 
             // Si el código ya existe → agregar al carrito
@@ -4163,9 +4190,9 @@
         }
 
         window.cambiarCantidad = (id, delta) => {
-            let idx = carrito.findIndex(i => i.id === id);
+            let idx = carrito.findIndex(i => i.id == id);
             if (idx === -1) return;
-            let p = productos.find(pr => pr.id === id);
+            let p = productos.find(pr => pr.id == id);
             let nueva = carrito[idx].cantidad + delta;
             if (nueva <= 0) {
                 const item = carrito[idx];
@@ -4247,9 +4274,9 @@
                 return `<li class="cart-item">
                     <div><strong>${nombreDisplay}</strong> $${item.precioSnapshot} ${precioDisplay} x${item.cantidad} ${unidadDisplay}</div>
                     <div class="cart-controls">
-                        <button onclick="cambiarCantidad(${item.id},-1)">-</button>
+                        <button onclick="cambiarCantidad('${String(item.id).replace(/'/g,"\\'")}',-1)">-</button>
                         <span style="min-width:28px; text-align:center; font-weight:700;">${item.cantidad}</span>
-                        <button onclick="cambiarCantidad(${item.id},1)">+</button>
+                        <button onclick="cambiarCantidad('${String(item.id).replace(/'/g,"\\'")}',1)">+</button>
                         <span style="margin-left:14px; font-weight:700;">$${subt.toFixed(2)}</span>
                     </div>
                 </li>`;
@@ -4444,52 +4471,8 @@
         }
 
         // ========================================================================
-        //  PAGO MIXTO CON VUELTO (CONTADO)
+        //  PAGO MIXTO CON VUELTO (CONTADO) - VERSIÓN MEJORADA CON SEPARACIÓN DE CIGARRILLOS
         // ========================================================================
-        async function seleccionarMetodoPago() {
-            if (!carrito.length) { toast("Carrito vacío", true); return; }
-
-            if (!caja.apertura) {
-                const modal = document.createElement('div');
-                modal.className = 'modal-overlay';
-                modal.innerHTML = `
-                    <div class="modal-card" style="max-width:450px;">
-                        <h3>💰 La caja está cerrada</h3>
-                        <p style="font-size:0.9rem;">Para realizar la venta, debes abrir la caja con el monto inicial:</p>
-                        <label>Efectivo inicial</label>
-                        <input type="number" id="aperturaEfectivo" placeholder="0.00" step="0.01" min="0" value="0">
-                        <label>Transferencia inicial</label>
-                        <input type="number" id="aperturaTransferencia" placeholder="0.00" step="0.01" min="0" value="0">
-                        <div style="display:flex; gap:14px; margin-top:18px;">
-                            <button id="confirmarApertura" class="btn btn-primary">Abrir Caja y continuar</button>
-                            <button id="cancelarApertura" class="btn btn-outline">Cancelar</button>
-                        </div>
-                    </div>
-                `;
-                document.body.appendChild(modal);
-                const aperturaEf = modal.querySelector('#aperturaEfectivo');
-                const aperturaTr = modal.querySelector('#aperturaTransferencia');
-
-                const doOpen = () => {
-                    const ef = parseFloat(aperturaEf.value) || 0;
-                    const tr = parseFloat(aperturaTr.value) || 0;
-                    if (abrirCaja(ef, tr)) {
-                        modal.remove();
-                        continuarPago();
-                    }
-                };
-
-                modal.querySelector('#confirmarApertura').onclick = doOpen;
-                modal.querySelector('#cancelarApertura').onclick = () => {
-                    modal.remove();
-                    toast("Operación cancelada", true);
-                };
-                return;
-            }
-
-            continuarPago();
-        }
-
         async function continuarPago() {
             for (let item of carrito) {
                 if (item.esSuelta) continue;
@@ -4501,12 +4484,47 @@
             const subtotal = carrito.reduce((s, i) => s + i.precioSnapshot * i.cantidad, 0);
             const total = calcularTotalConDescuento(subtotal);
 
+            // 🔥 DETECTAR CIGARRILLOS
+            let totalCigarrillos = 0;
+            let itemsCigarrillos = [];
+            let itemsNoCigarrillos = [];
+
+            for (let item of carrito) {
+                let prod = productos.find(p => p.id === item.id);
+                let esCigarrillo = prod && esProductoCigarrillo(prod);
+                if (esCigarrillo) {
+                    totalCigarrillos += item.precioSnapshot * item.cantidad;
+                    itemsCigarrillos.push(item);
+                } else {
+                    itemsNoCigarrillos.push(item);
+                }
+            }
+
+            const totalResto = total - totalCigarrillos;
+
             const modal = document.createElement('div');
             modal.className = 'modal-overlay';
             modal.innerHTML = `
                 <div class="modal-card" style="max-width:550px;">
                     <h3>💳 Pago Mixto</h3>
                     <p style="font-size:1.2rem; font-weight:700; text-align:center;">Total a pagar: $${total.toFixed(2)}</p>
+                    ${totalCigarrillos > 0 ? `
+                        <div style="background:var(--surface2); padding:10px; border-radius:12px; margin:10px 0;">
+                            <div style="display:flex; justify-content:space-between; font-weight:600;">
+                                <span>🚬 Cigarrillos</span>
+                                <span>$${totalCigarrillos.toFixed(2)}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-weight:600;">
+                                <span>🛒 Resto</span>
+                                <span>$${totalResto.toFixed(2)}</span>
+                            </div>
+                            <hr style="margin:6px 0;">
+                            <div style="display:flex; justify-content:space-between; font-weight:700;">
+                                <span>Total</span>
+                                <span>$${total.toFixed(2)}</span>
+                            </div>
+                        </div>
+                    ` : ''}
                     <div style="margin:16px 0; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                         <div><label>💰 Efectivo</label><input type="number" id="pagoEfectivo" placeholder="0.00" step="0.01" min="0" value="0"></div>
                         <div><label>💳 Transferencia</label><input type="number" id="pagoTransferencia" placeholder="0.00" step="0.01" min="0" value="0"><br><label style="font-size:0.8rem;display:flex;align-items:center;gap:4px;margin-top:2px;"><input type="checkbox" id="transfPendiente"> ⏳ Aún no transfirió (pendiente)</label></div>
@@ -4641,12 +4659,12 @@
                         });
                         saveAll();
                         modal2.remove();
-                        finalizarVentaMixta(total, movimientos, vuelto);
+                        finalizarVentaMixta(total, movimientos, vuelto, totalCigarrillos);
                         toast("⏳ Transferencia pendiente registrada");
                     };
                     const omitirPendiente = () => {
                         modal2.remove();
-                        finalizarVentaMixta(total, movimientos, vuelto);
+                        finalizarVentaMixta(total, movimientos, vuelto, totalCigarrillos);
                         toast("Transferencia pendiente omitida");
                     };
                     modal2.querySelector('#confirmarPendiente').onclick = guardarPendiente;
@@ -4656,20 +4674,90 @@
                     return;
                 }
 
-                finalizarVentaMixta(total, movimientos, vuelto);
+                finalizarVentaMixta(total, movimientos, vuelto, totalCigarrillos);
             };
 
             modal.querySelector('#cancelarPagoMixto').onclick = () => modal.remove();
             modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
         }
 
-        async function finalizarVentaMixta(total, movimientos, vuelto = 0) {
+        async function seleccionarMetodoPago() {
+            if (!carrito.length) { toast("Carrito vacío", true); return; }
+
+            if (!caja.apertura) {
+                const modal = document.createElement('div');
+                modal.className = 'modal-overlay';
+                modal.innerHTML = `
+                    <div class="modal-card" style="max-width:450px;">
+                        <h3>💰 La caja está cerrada</h3>
+                        <p style="font-size:0.9rem;">Para realizar la venta, debes abrir la caja con el monto inicial:</p>
+                        <label>Efectivo inicial</label>
+                        <input type="number" id="aperturaEfectivo" placeholder="0.00" step="0.01" min="0" value="0">
+                        <label>Transferencia inicial</label>
+                        <input type="number" id="aperturaTransferencia" placeholder="0.00" step="0.01" min="0" value="0">
+                        <div style="display:flex; gap:14px; margin-top:18px;">
+                            <button id="confirmarApertura" class="btn btn-primary">Abrir Caja y continuar</button>
+                            <button id="cancelarApertura" class="btn btn-outline">Cancelar</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+                const aperturaEf = modal.querySelector('#aperturaEfectivo');
+                const aperturaTr = modal.querySelector('#aperturaTransferencia');
+
+                const doOpen = () => {
+                    const ef = parseFloat(aperturaEf.value) || 0;
+                    const tr = parseFloat(aperturaTr.value) || 0;
+                    if (abrirCaja(ef, tr)) {
+                        modal.remove();
+                        continuarPago();
+                    }
+                };
+
+                modal.querySelector('#confirmarApertura').onclick = doOpen;
+                modal.querySelector('#cancelarApertura').onclick = () => {
+                    modal.remove();
+                    toast("Operación cancelada", true);
+                };
+                return;
+            }
+
+            continuarPago();
+        }
+
+        async function finalizarVentaMixta(total, movimientos, vuelto = 0, totalCigarrillos = 0) {
             for (let item of carrito) {
                 if (item.esSuelta) continue;
                 let prod = productos.find(p => p.id === item.id);
                 if (prod) {
                     prod.stock -= item.cantidad;
                     prod.ventasTotales += item.cantidad;
+                    // Cigarette stock deduction (atados/cartones)
+                    if (esItemCigarrillo(item)) {
+                        let atadosADeducir = item.cantidad;
+                        if (prod.stockAtados !== undefined) {
+                            let deAtados = Math.min(atadosADeducir, prod.stockAtados);
+                            prod.stockAtados -= deAtados;
+                            atadosADeducir -= deAtados;
+                            if (atadosADeducir > 0 && prod.stockCartones > 0) {
+                                const apc = prod.atadosPorCarton || getCigConfig().atadosPorCarton;
+                                let cartNeeded = Math.ceil(atadosADeducir / apc);
+                                cartNeeded = Math.min(cartNeeded, prod.stockCartones);
+                                prod.stockCartones -= cartNeeded;
+                                prod.stockAtados += (cartNeeded * apc) - atadosADeducir;
+                                atadosADeducir = 0;
+                            }
+                        }
+                        cigMovimientosStock.push({
+                            fecha: new Date().toISOString(),
+                            productoId: prod.id,
+                            productoNombre: prod.nombre,
+                            tipo: 'venta',
+                            cartones: 0,
+                            atados: -(item.cantidad),
+                            descripcion: 'Venta #' + Date.now()
+                        });
+                    }
                 }
             }
 
@@ -4715,7 +4803,12 @@
                 devuelta: false,
                 montoPagado: movimientos.reduce((s, m) => s + m.monto, 0),
                 pagoMixto: movimientos,
-                vuelto: vuelto
+                vuelto: vuelto,
+                // 🔥 Guardamos el desglose de cigarrillos
+                desglose: {
+                    cigarrillos: totalCigarrillos,
+                    resto: total - totalCigarrillos
+                }
             };
             ventas.unshift(nuevaVenta);
 
@@ -4723,14 +4816,63 @@
                 turnoActivo.totalVendido += total; }
 
             if (caja.apertura) {
-                for (let m of movimientos) {
-                    caja.movimientos.push({
-                        fecha: new Date().toISOString(),
-                        tipo: "ingreso",
-                        monto: m.monto,
-                        descripcion: `Venta mixto (${m.metodo})`,
-                        metodo: m.metodo
-                    });
+                // Si hay cigarrillos, registramos movimientos separados
+                if (totalCigarrillos > 0) {
+                    // Distribuir proporcionalmente los pagos entre cigarrillos y resto
+                    for (let m of movimientos) {
+                        // Calcular monto cigarrillos con redondeo; resto = diferencia exacta
+                        let montoCigarrillos = Math.round(m.monto * (totalCigarrillos / total) * 100) / 100;
+                        let montoResto = Math.round((m.monto - montoCigarrillos) * 100) / 100;
+                        // Ajustar el primer movimiento para absorber diferencias de redondeo acumuladas
+                        if (m === movimientos[0]) {
+                            let sumaCig = movimientos.reduce((acc, cur) => {
+                                if (cur === m) return acc + montoCigarrillos;
+                                return acc + Math.round(cur.monto * (totalCigarrillos / total) * 100) / 100;
+                            }, 0);
+                            montoCigarrillos += Math.round((totalCigarrillos - sumaCig) * 100) / 100;
+                            montoResto = Math.round((m.monto - montoCigarrillos) * 100) / 100;
+                        }
+                        if (montoCigarrillos > 0.001) {
+                            caja.movimientos.push({
+                                fecha: new Date().toISOString(),
+                                tipo: "ingreso",
+                                monto: montoCigarrillos,
+                                descripcion: `Venta cigarrillos (${m.metodo})`,
+                                metodo: m.metodo
+                            });
+                            // También registrar en caja de cigarrillos si está abierta
+                            if (cigCaja && cigCaja.apertura) {
+                                cigCaja.movimientos.push({
+                                    fecha: new Date().toISOString(),
+                                    tipo: "ingreso",
+                                    monto: montoCigarrillos,
+                                    descripcion: `Venta cigarrillos (${m.metodo})`,
+                                    metodo: m.metodo
+                                });
+                                actualizarCigCajaSaldo();
+                            }
+                        }
+                        if (montoResto > 0.001) {
+                            caja.movimientos.push({
+                                fecha: new Date().toISOString(),
+                                tipo: "ingreso",
+                                monto: montoResto,
+                                descripcion: `Venta general (${m.metodo})`,
+                                metodo: m.metodo
+                            });
+                        }
+                    }
+                } else {
+                    // Sin cigarrillos, registro normal
+                    for (let m of movimientos) {
+                        caja.movimientos.push({
+                            fecha: new Date().toISOString(),
+                            tipo: "ingreso",
+                            monto: m.monto,
+                            descripcion: `Venta mixto (${m.metodo})`,
+                            metodo: m.metodo
+                        });
+                    }
                 }
                 if (vuelto > 0) {
                     caja.movimientos.push({
@@ -4763,7 +4905,8 @@
             }
 
             let msgVuelto = vuelto > 0 ? ` | 💸 Vuelto: $${vuelto.toFixed(2)}` : '';
-            toast(`Venta $${total.toFixed(2)} | Pago: ${descMetodos}${msgVuelto}`);
+            let msgCigarrillos = totalCigarrillos > 0 ? ` (🚬 Cigarrillos: $${totalCigarrillos.toFixed(2)})` : '';
+            toast(`Venta $${total.toFixed(2)} | Pago: ${descMetodos}${msgVuelto}${msgCigarrillos}`);
         }
 
         async function venderTransferenciaPendiente() {
@@ -4986,9 +5129,9 @@
                 return `<li class="quick-cart-item">
                     <div><strong>${nombreDisplay}</strong> $${item.precioSnapshot} ${precioDisplay} x${item.cantidad}</div>
                     <div>
-                        <button onclick="cambiarCantidad(${item.id},-1)" class="btn btn-outline" style="padding:4px 12px;">-</button>
+                        <button onclick="cambiarCantidad('${String(item.id).replace(/'/g,"\\'")}',-1)" class="btn btn-outline" style="padding:4px 12px;">-</button>
                         ${item.cantidad}
-                        <button onclick="cambiarCantidad(${item.id},1)" class="btn btn-outline" style="padding:4px 12px;">+</button>
+                        <button onclick="cambiarCantidad('${String(item.id).replace(/'/g,"\\'")}',1)" class="btn btn-outline" style="padding:4px 12px;">+</button>
                         <strong>$${subt.toFixed(2)}</strong>
                     </div>
                 </li>`;
@@ -5059,7 +5202,7 @@
                     <input id="prodCosto" type="number" placeholder="Costo" style="width:110px; border-radius:14px;">
                     <input id="prodMargen" type="number" placeholder="% Ganancia" style="width:100px; border-radius:14px;" step="any" min="0">
                     <button id="calcPrecioBtn" class="btn btn-warning" title="Calcular precio con costo + % ganancia">🧮 Calcular</button>
-                    <input id="prodStock" type="number" placeholder="Stock" style="width:90px; border-radius:14px;">
+                    <input id="prodStock" type="number" placeholder="Stock" value="0" style="width:90px; border-radius:14px;">
                     <input id="prodEmoji" placeholder="Emoji" value="📦" style="width:80px; border-radius:14px;">
                     <input id="prodCodigo" placeholder="Código" style="width:110px; border-radius:14px;">
                     <select id="prodTipoVenta" style="padding:10px; border-radius:14px;">
@@ -5080,6 +5223,9 @@
                     <input id="prodSinonimos" placeholder="Sinónimos (;)" style="flex:1; min-width:130px; border-radius:14px;">
                     <select id="prodCategoria" style="padding:10px; border-radius:14px;"></select>
                     <select id="prodProv" style="padding:10px; border-radius:14px;"></select>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; white-space:nowrap;">
+                        <input type="checkbox" id="prodEsCigarrillo"> 🚬 Cigarrillo
+                    </label>
                     <button id="guardarProdBtn" class="btn btn-primary">Guardar</button>
                     <button id="limpiarProdBtn" class="btn btn-outline">Limpiar</button>
                     <input type="hidden" id="editProdId">
@@ -5208,9 +5354,8 @@
                 const originalHandler = window.handleScannedCodeUniversal;
                 window.handleScannedCodeUniversal = function(code, modal) {
                     try {
-                        const prod = findProductoPorCodigo(code);
+                        const prod = productos.find(p => p.codigo === code);
                         if (prod) {
-                            agregarAlCarrito(prod.id);
                             mostrarProducto(prod);
                             if (currentScannerModal) {
                                 if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
@@ -5519,7 +5664,7 @@
                             if (catNombre) {
                                 let cat = categorias.find(c => c.nombre.toLowerCase() === catNombre.toLowerCase());
                                 if (!cat) {
-                                    cat = { id: Date.now() + Math.random() * 1000, nombre: catNombre };
+                                    cat = { id: Date.now() + Math.floor(Math.random() * 10000), nombre: catNombre };
                                     categorias.push(cat);
                                 }
                                 categoriaId = cat.id;
@@ -5530,7 +5675,7 @@
                             if (provNombre) {
                                 let prov = proveedores.find(p => p.nombre.toLowerCase() === provNombre.toLowerCase());
                                 if (!prov) {
-                                    prov = { id: Date.now() + Math.random() * 1000, nombre: provNombre, contacto: '',
+                                    prov = { id: Date.now() + Math.floor(Math.random() * 10000), nombre: provNombre, contacto: '',
                                         telefono: '', productosIds: [], deuda: 0, pedidos: [] };
                                     proveedores.push(prov);
                                 }
@@ -5690,7 +5835,7 @@
                 renderTablaConFiltro(); });
 
             window.editarProductoModal = (id) => {
-                let p = productos.find(pr => pr.id === id);
+            let p = productos.find(pr => pr.id == id);
                 if (!p) return;
                 const modal = document.createElement('div');
                 modal.className = 'modal-overlay';
@@ -5726,6 +5871,9 @@
                         <input id="editSinonimos" placeholder="Sinónimos (;)" value="${escapeHtml(p.sinonimos||'')}">
                         <select id="editCategoria">${categorias.map(c=>`<option value="${c.id}" ${p.categoriaId==c.id?'selected':''}>${escapeHtml(c.nombre)}</option>`).join('')}</select>
                         <select id="editProveedor"><option value="">Sin proveedor</option>${proveedores.map(pr=>`<option value="${pr.id}" ${p.proveedorId==pr.id?'selected':''}>${escapeHtml(pr.nombre)}</option>`).join('')}</select>
+                        <label style="display:flex; align-items:center; gap:8px; margin-top:8px; cursor:pointer;">
+                            <input type="checkbox" id="editEsCigarrillo" ${p.esCigarrillo?'checked':''}> 🚬 Es cigarrillo
+                        </label>
                         <div style="display:flex; gap:14px; margin-top:18px;">
                             <button id="guardarEditBtn" class="btn btn-primary">Guardar</button>
                             <button id="cancelEditBtn" class="btn btn-outline">Cancelar</button>
@@ -5770,6 +5918,7 @@
                     p.contenido = document.getElementById("editContenido").value.trim();
                     p.alias = document.getElementById("editAlias").value.trim();
                     p.sinonimos = document.getElementById("editSinonimos").value.trim();
+                    p.esCigarrillo = document.getElementById("editEsCigarrillo").checked;
                     if (isNaN(p.precio) || isNaN(p.stock)) { toast("Precio y stock deben ser números", true); return; }
                     saveAll();
                     renderTablaConFiltro();
@@ -5807,7 +5956,7 @@
                 let nombre = document.getElementById("prodNombre").value.trim();
                 let precio = parseFloat(document.getElementById("prodPrecio").value);
                 let costo = parseFloat(document.getElementById("prodCosto").value) || 0;
-                let stock = parseInt(document.getElementById("prodStock").value);
+                let stock = parseInt(document.getElementById("prodStock").value) || 0;
                 let emoji = document.getElementById("prodEmoji").value.trim() || "📦";
                 let codigo = document.getElementById("prodCodigo").value.trim();
                 let provId = parseInt(document.getElementById("prodProv").value) || null;
@@ -5836,6 +5985,7 @@
                 let contenido = document.getElementById("prodContenido").value.trim();
                 let alias = document.getElementById("prodAlias").value.trim();
                 let sinonimos = document.getElementById("prodSinonimos").value.trim();
+                let esCigarrillo = document.getElementById("prodEsCigarrillo").checked;
                 if (editId) {
                     let idx = productos.findIndex(p => p.id == editId);
                     if (idx !== -1) productos[idx] = { ...productos[idx], nombre, precio, costo, stock, emoji,
@@ -5844,7 +5994,7 @@
                         precioEspecial: (precioEspecial && precioEspecial > 0) ? precioEspecial : null,
                         horaInicioEspecial: horaInicio,
                         horaFinEspecial: horaFin,
-                        marca, descripcion, imagen, peso, presentacion, contenido, alias, sinonimos
+                        marca, descripcion, imagen, peso, presentacion, contenido, alias, sinonimos, esCigarrillo
                     };
                     toast("Producto actualizado");
                 } else {
@@ -5859,7 +6009,7 @@
                         precioEspecial: (precioEspecial && precioEspecial > 0) ? precioEspecial : null,
                         horaInicioEspecial: horaInicio,
                         horaFinEspecial: horaFin,
-                        marca, descripcion, imagen, peso, presentacion, contenido, alias, sinonimos
+                        marca, descripcion, imagen, peso, presentacion, contenido, alias, sinonimos, esCigarrillo
                     });
                     toast("Producto agregado");
                 }
@@ -5905,6 +6055,7 @@
                 document.getElementById("prodContenido").value = "";
                 document.getElementById("prodAlias").value = "";
                 document.getElementById("prodSinonimos").value = "";
+                document.getElementById("prodEsCigarrillo").checked = false;
             };
 
             renderTablaConFiltro();
@@ -6205,7 +6356,12 @@
             window._cajaRefreshInterval = setInterval(() => {
                 if (document.getElementById('caja')?.classList.contains('active')) {
                     const fecha = document.getElementById('cajaFechaFilter')?.value;
-                    if (fecha) actualizarCajaUI(fecha);
+                    if (fecha) {
+                        const r = document.getElementById('cajaResumen'), m = document.getElementById('cajaMovimientos');
+                        const sr = r ? r.scrollTop : 0, sm = m ? m.scrollTop : 0;
+                        actualizarCajaUI(fecha);
+                        if (r) r.scrollTop = sr; if (m) m.scrollTop = sm;
+                    }
                 }
             }, 2000);
         }
@@ -6605,6 +6761,7 @@
                 caja.cierres = caja.cierres.filter(c => new Date(c.fecha).getTime() > limite);
 
                 // ========== LIMPIEZA TOTAL DE LA CAJA PARA LA PRÓXIMA APERTURA ==========
+                caja.cerradaEn = new Date().toISOString();
                 caja.apertura = null;
                 caja.montoAperturaEfectivo = 0;
                 caja.montoAperturaTransferencia = 0;
@@ -6744,6 +6901,7 @@
                 ventas = [];
                 gastos = [];
                 caja.movimientos = [];
+                caja.cerradaEn = new Date().toISOString();
                 caja.apertura = null;
                 caja.montoAperturaEfectivo = 0;
                 caja.montoAperturaTransferencia = 0;
@@ -8826,15 +8984,17 @@ function refreshCurrentTab() {
             else if (active === 'carteleria') renderCarteleria();
             else if (active === 'etiquetas') renderEtiquetas();
             else if (active === 'codigos') renderCodigos();
+            else if (active === 'cigarrillos') renderCigarrillos();
+            else if (active === 'sube') renderSube();
             if (active !== 'rapido') stopQuickCamera();
         }
 
         function initTabs() {
             const tabs = ["ventas", "rapido", "turnos", "admin", "caja", "contabilidad", "estadisticas", "reportes",
-                "proveedores", "fiado", "transfs", "carteleria", "etiquetas", "codigos"
+                "proveedores", "fiado", "transfs", "carteleria", "etiquetas", "codigos", "cigarrillos", "sube"
             ];
             const nombres = ["VENTAS", "⚡ RÁPIDO", "📅 TURNOS", "ADMIN", "CAJA", "CONTAB", "ESTADÍSTICAS",
-                "📜 HISTORIAL", "PROVEEDORES", "📝 FIADO", "⏳ PENDS", "🖼️ CARTELES", "🏷️ ETIQUETAS", "🔳 CÓDIGOS"
+                "📜 HISTORIAL", "PROVEEDORES", "📝 FIADO", "⏳ PENDS", "🖼️ CARTELES", "🏷️ ETIQUETAS", "🔳 CÓDIGOS", "🚬 CIGARRILLOS", "💳 SUBE"
             ];
             const container = document.getElementById("tabsContainer");
             container.innerHTML = "";
@@ -8844,7 +9004,7 @@ function refreshCurrentTab() {
                 btn.innerText = nombres[idx];
                 btn.dataset.tab = t;
                 btn.onclick = async () => {
-                    if (t !== "ventas" && t !== "rapido" && t !== "turnos" && t !== "fiado" && t !== "caja" && t !== "transfs" && t !== "carteleria" && t !== "etiquetas" && t !== "codigos" && !isAdmin) {
+                    if (t !== "ventas" && t !== "rapido" && t !== "turnos" && t !== "fiado" && t !== "caja" && t !== "transfs" && t !== "carteleria" && t !== "etiquetas" && t !== "codigos" && t !== "cigarrillos" && t !== "sube" && !isAdmin) {
                         if (!await ensureAdmin()) return;
                     }
                     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -8861,10 +9021,11 @@ function refreshCurrentTab() {
         //  LOAD
         // ========================================================================
         async function loadAll() {
-            productos = JSON.parse(localStorage.getItem(PREF + 'productos') || '[]');
+            function safeParse(key, fallback) { try { return JSON.parse(localStorage.getItem(PREF + key) || JSON.stringify(fallback)); } catch (e) { return fallback; } }
+            productos = safeParse('productos', []);
             if (!productos.length) {
                 categorias = [{ id: 1, nombre: "Bebidas" }, { id: 2, nombre: "Snacks" }, { id: 3, nombre: "Golosinas" },
-                    { id: 4, nombre: "Panadería" }, { id: 5, nombre: "Fiambres" }
+                    { id: 4, nombre: "Panadería" }, { id: 5, nombre: "Fiambres" }, { id: 6, nombre: "Cigarrillos" }
                 ];
                 productos = [
                     { id: 1, nombre: "Coca Cola", precio: 1200, stock: 20, emoji: "🥤", costo: 750, proveedorId: 1,
@@ -8885,12 +9046,22 @@ function refreshCurrentTab() {
                         precioPorKilo: 1200, precioEspecial: 1500, horaInicioEspecial: "22:00", horaFinEspecial: "06:00" },
                     { id: 6, nombre: "Jamón Cocido", precio: 2500, stock: 10, emoji: "🍖", costo: 1800, proveedorId: 2,
                         categoriaId: 5, ventasTotales: 0, codigo: "JAM001", vencimiento: null, tipoVenta: 'peso',
-                        precioPorKilo: 2500, precioEspecial: 2800, horaInicioEspecial: "22:00", horaFinEspecial: "06:00" }
+                        precioPorKilo: 2500, precioEspecial: 2800, horaInicioEspecial: "22:00", horaFinEspecial: "06:00" },
+                    { id: 7, nombre: "Marlboro", precio: 4200, stock: 50, emoji: "🚬", costo: 3500, proveedorId: 2,
+                        categoriaId: 6, ventasTotales: 0, codigo: "MAR001", vencimiento: null, tipoVenta: 'unidad',
+                        precioPorKilo: null, precioEspecial: null, horaInicioEspecial: null, horaFinEspecial: null,
+                        esCigarrillo: true, stockAtados: 50, stockCartones: 5, stockMinimo: 10, atadosPorCarton: 10 },
+                    { id: 8, nombre: "Chesterfield", precio: 4000, stock: 40, emoji: "🚬", costo: 3300, proveedorId: 2,
+                        categoriaId: 6, ventasTotales: 0, codigo: "CHE001", vencimiento: null, tipoVenta: 'unidad',
+                        precioPorKilo: null, precioEspecial: null, horaInicioEspecial: null, horaFinEspecial: null,
+                        esCigarrillo: true, stockAtados: 40, stockCartones: 4, stockMinimo: 8, atadosPorCarton: 10 },
+                    { id: 9, nombre: "Philip Morris", precio: 4300, stock: 30, emoji: "🚬", costo: 3600, proveedorId: 2,
+                        categoriaId: 6, ventasTotales: 0, codigo: "PM001", vencimiento: null, tipoVenta: 'unidad',
+                        precioPorKilo: null, precioEspecial: null, horaInicioEspecial: null, horaFinEspecial: null,
+                        esCigarrillo: true, stockAtados: 30, stockCartones: 3, stockMinimo: 5, atadosPorCarton: 10 }
                 ];
             } else {
-                let cats = localStorage.getItem(PREF + 'categorias');
-                if (cats) categorias = JSON.parse(cats);
-                else categorias = [{ id: 1, nombre: "General" }];
+                categorias = safeParse('categorias', [{ id: 1, nombre: "General" }]);
                 productos.forEach(p => {
                     if (p.tipoVenta === undefined) p.tipoVenta = 'unidad';
                     if (p.precioPorKilo === undefined) p.precioPorKilo = null;
@@ -8898,14 +9069,34 @@ function refreshCurrentTab() {
                     if (p.horaInicioEspecial === undefined) p.horaInicioEspecial = null;
                     if (p.horaFinEspecial === undefined) p.horaFinEspecial = null;
                 });
+                // Migración: auto-detectar cigarrillos por categoría para productos existentes
+                productos.forEach(p => {
+                    if (p.esCigarrillo === undefined) {
+                        let cat = categorias.find(c => c.id === p.categoriaId);
+                        p.esCigarrillo = cat && cat.nombre.toLowerCase().includes('cigarrillo');
+                    }
+                });
             }
-            ventas = JSON.parse(localStorage.getItem(PREF + 'ventas') || '[]');
-            turnosCaja = JSON.parse(localStorage.getItem(PREF + 'turnos') || '[]');
-            gastos = JSON.parse(localStorage.getItem(PREF + 'gastos') || '[]');
-            proveedores = JSON.parse(localStorage.getItem(PREF + 'proveedores') || '[]');
+            ventas = safeParse('ventas', []);
+            turnosCaja = safeParse('turnos', []);
+            gastos = safeParse('gastos', []);
+            proveedores = safeParse('proveedores', []);
             cargarAuditoriaBorrados();
-            let cj = localStorage.getItem(PREF + 'caja');
-            if (cj) caja = JSON.parse(cj);
+            // Cargar datos cigarrillos
+            cigCaja = safeParse('cigCaja', cigCaja);
+            if (cigCaja.efectivo === undefined) cigCaja.efectivo = 0;
+            if (cigCaja.transferencia === undefined) cigCaja.transferencia = 0;
+            if (cigCaja.montoAperturaEfectivo === undefined) cigCaja.montoAperturaEfectivo = 0;
+            if (cigCaja.montoAperturaTransferencia === undefined) cigCaja.montoAperturaTransferencia = 0;
+            if (!cigCaja.movimientos) cigCaja.movimientos = [];
+            if (!cigCaja.cierres) cigCaja.cierres = [];
+            if (!cigCaja.transferenciasACajaGeneral) cigCaja.transferenciasACajaGeneral = [];
+            if (cigCaja._version === undefined) cigCaja._version = 0;
+            if (cigCaja.cerradaEn === undefined) cigCaja.cerradaEn = null;
+            cigCompras = safeParse('cigCompras', []);
+            cigMovimientosStock = safeParse('cigMovimientosStock', []);
+            subeCargas = safeParse('subeCargas', []);
+            caja = safeParse('caja', caja);
             if (caja.montoApertura !== undefined && caja.montoAperturaEfectivo === undefined) {
                 caja.montoAperturaEfectivo = caja.montoApertura || 0;
                 caja.montoAperturaTransferencia = 0;
@@ -8920,6 +9111,7 @@ function refreshCurrentTab() {
             if (!caja.movimientos) caja.movimientos = [];
             if (!caja.cierres) caja.cierres = [];
             if (caja._version === undefined) caja._version = 0;
+            if (caja.cerradaEn === undefined) caja.cerradaEn = null;
             window._normalizarCaja = function(cj) {
                 if (cj.montoApertura !== undefined && cj.montoAperturaEfectivo === undefined) {
                     cj.montoAperturaEfectivo = cj.montoApertura || 0;
@@ -8935,19 +9127,18 @@ function refreshCurrentTab() {
                 if (!cj.movimientos) cj.movimientos = [];
                 if (!cj.cierres) cj.cierres = [];
                 if (cj._version === undefined) cj._version = 0;
+                if (cj.cerradaEn === undefined) cj.cerradaEn = null;
             };
-            transferenciasPendientes = JSON.parse(localStorage.getItem(PREF + 'transferenciasPendientes') || '[]');
-            carteles = JSON.parse(localStorage.getItem(PREF + 'carteles') || '[]');
-            etiquetasGuardadas = JSON.parse(localStorage.getItem(PREF + 'etiquetasGuardadas') || '[]');
-            plantillasCarteles = JSON.parse(localStorage.getItem(PREF + 'plantillasCarteles') || '[]');
-            barcodeCache = JSON.parse(localStorage.getItem(PREF + 'barcodeCache') || '{}');
+            transferenciasPendientes = safeParse('transferenciasPendientes', []);
+            carteles = safeParse('carteles', []);
+            etiquetasGuardadas = safeParse('etiquetasGuardadas', []);
+            plantillasCarteles = safeParse('plantillasCarteles', []);
+            barcodeCache = safeParse('barcodeCache', {});
 
             actualizarSaldoCaja();
 
-            let ng = localStorage.getItem(PREF + 'negocio');
-            if (ng) negocio = JSON.parse(ng);
-            let cf = localStorage.getItem(PREF + 'config');
-            if (cf) config = JSON.parse(cf);
+            negocio = safeParse('negocio', negocio);
+            config = safeParse('config', config);
             if (config.vencimientoAlertDays === undefined) config.vencimientoAlertDays = 7;
             if (config.lowStockThreshold === undefined) config.lowStockThreshold = 3;
             if (config.mostrarTicket === undefined) config.mostrarTicket = true;
@@ -8956,8 +9147,7 @@ function refreshCurrentTab() {
             if (savedZoom) config.zoomLevel = parseFloat(savedZoom);
             document.body.style.fontSize = (17 * config.zoomLevel) + 'px';
 
-            let ta = localStorage.getItem(PREF + 'turnoActivo');
-            if (ta) turnoActivo = JSON.parse(ta);
+            turnoActivo = safeParse('turnoActivo', turnoActivo);
 
             if (!proveedores.length) proveedores.push({ id: 1, nombre: "Distribuidora Central", contacto: "Juan",
                 telefono: "11223344", productosIds: [], deuda: 0, pedidos: [] });
@@ -8990,9 +9180,7 @@ function refreshCurrentTab() {
             });
             gastos.forEach(g => { if (!g.categoria) g.categoria = "General"; });
 
-            let cl = localStorage.getItem(PREF + 'clientes');
-            if (cl) clientes = JSON.parse(cl);
-            else clientes = [];
+            clientes = safeParse('clientes', []);
             clientes.forEach(c => {
                 if (c.deuda === undefined) c.deuda = 0;
                 if (!c.historial) c.historial = [];
@@ -9002,17 +9190,19 @@ function refreshCurrentTab() {
             });
 
             // Cargar sesiones múltiples
-            let sesionesGuardadas = localStorage.getItem(PREF + 'sesiones');
-            if (sesionesGuardadas) {
-                sesiones = JSON.parse(sesionesGuardadas);
-                sesionActual = localStorage.getItem(PREF + 'sesionActual') || 'caja1';
-                if (!sesiones[sesionActual]) sesionActual = 'caja1';
-                carrito = sesiones[sesionActual].items;
-                descuentoActivo = sesiones[sesionActual].descuento;
-            } else {
-                carrito = JSON.parse(localStorage.getItem(PREF + 'carrito') || '[]');
-                sesiones['caja1'].items = carrito;
-            }
+            try {
+                let sesionesGuardadas = localStorage.getItem(PREF + 'sesiones');
+                if (sesionesGuardadas) {
+                    sesiones = JSON.parse(sesionesGuardadas);
+                    sesionActual = localStorage.getItem(PREF + 'sesionActual') || 'caja1';
+                    if (!sesiones[sesionActual]) sesionActual = 'caja1';
+                    carrito = sesiones[sesionActual].items;
+                    descuentoActivo = sesiones[sesionActual].descuento;
+                } else {
+                    carrito = safeParse('carrito', []);
+                    sesiones['caja1'].items = carrito;
+                }
+            } catch (e) { sesiones = { "caja1": { id: "caja1", nombre: "👤 Caja 1", items: [], descuento: { tipo: null, valor: 0 } }, "caja2": { id: "caja2", nombre: "👤 Caja 2", items: [], descuento: { tipo: null, valor: 0 } } }; sesionActual = "caja1"; carrito = []; descuentoActivo = { tipo: null, valor: 0 }; }
 
             const PIN_FIJO = '5050';
             if (!localStorage.getItem('kiosco_pin_hash')) {
@@ -9098,7 +9288,7 @@ function refreshCurrentTab() {
             };
             document.getElementById("backupBtn").onclick = () => {
                 const data = JSON.stringify({ productos, ventas, turnosCaja, gastos, proveedores, caja, negocio,
-                    config, categorias, empleados, turnos, auditoriaBorrados, clientes, carrito, sesiones, sesionActual, transferenciasPendientes }, null, 2);
+                    config, categorias, empleados, turnos, auditoriaBorrados, clientes, carrito, sesiones, sesionActual, transferenciasPendientes, cigCaja, cigCompras, cigMovimientosStock, subeCargas, carteles, plantillasCarteles, etiquetasGuardadas, barcodeCache }, null, 2);
                 const blob = new Blob([data], { type: "application/json" });
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
@@ -9139,6 +9329,14 @@ function refreshCurrentTab() {
                                 descuentoActivo = sesiones[sesionActual].descuento;
                             }
                             if (data.transferenciasPendientes) transferenciasPendientes.splice(0, transferenciasPendientes.length, ...data.transferenciasPendientes);
+                            if (data.cigCaja) Object.assign(cigCaja, data.cigCaja);
+                            if (data.cigCompras) cigCompras.splice(0, cigCompras.length, ...data.cigCompras);
+                            if (data.cigMovimientosStock) cigMovimientosStock.splice(0, cigMovimientosStock.length, ...data.cigMovimientosStock);
+                            if (data.subeCargas) subeCargas.splice(0, subeCargas.length, ...data.subeCargas);
+                            if (data.carteles) carteles.splice(0, carteles.length, ...data.carteles);
+                            if (data.plantillasCarteles) plantillasCarteles.splice(0, plantillasCarteles.length, ...data.plantillasCarteles);
+                            if (data.etiquetasGuardadas) etiquetasGuardadas.splice(0, etiquetasGuardadas.length, ...data.etiquetasGuardadas);
+                            if (data.barcodeCache) barcodeCache = data.barcodeCache;
                             actualizarSaldoCaja();
                             saveAll();
                             location.reload();
@@ -10152,6 +10350,10 @@ function refreshCurrentTab() {
                 carteles: window.carteles,
                 plantillasCarteles: window.plantillasCarteles,
                 etiquetasGuardadas: window.etiquetasGuardadas,
+                cigCaja: window.cigCaja,
+                cigCompras: window.cigCompras,
+                cigMovimientosStock: window.cigMovimientosStock,
+                subeCargas: window.subeCargas,
 
                 _version: (window._syncVersion || 0) + 1,
                 timestamp: serverTimestamp()
@@ -10195,7 +10397,10 @@ function refreshCurrentTab() {
             if (fbData.caja) {
                 const fbCajaVer = fbData.caja._version || 0;
                 const localCajaVer = window.caja._version || 0;
-                if (fbCajaVer > localCajaVer) {
+                // Nunca restaurar caja abierta desde Firebase si localmente está cerrada
+                if (!window.caja.apertura && fbData.caja.apertura && window.caja.cerradaEn) {
+                    // La caja fue cerrada localmente, no restaurar estado abierto de Firebase
+                } else if (fbCajaVer > localCajaVer) {
                     Object.assign(window.caja, fbData.caja);
                     if (window._normalizarCaja) window._normalizarCaja(window.caja);
                     changed = true;
@@ -10221,6 +10426,27 @@ function refreshCurrentTab() {
             if (fbData.plantillasCarteles) { window.plantillasCarteles.splice(0, window.plantillasCarteles.length, ...fbData.plantillasCarteles);
                 changed = true; }
             if (fbData.etiquetasGuardadas) { window.etiquetasGuardadas.splice(0, window.etiquetasGuardadas.length, ...fbData.etiquetasGuardadas);
+                changed = true; }
+            window._normalizarCigCaja = function(cc) {
+                if (cc._version === undefined) cc._version = 0;
+                if (cc.cerradaEn === undefined) cc.cerradaEn = null;
+            };
+            if (fbData.cigCaja) {
+                const fbCigVer = fbData.cigCaja._version || 0;
+                const localCigVer = window.cigCaja._version || 0;
+                if (!window.cigCaja.apertura && fbData.cigCaja.apertura && window.cigCaja.cerradaEn) {
+                    // cigCaja was closed locally, don't restore open state from Firebase
+                } else if (fbCigVer > localCigVer) {
+                    Object.assign(window.cigCaja, fbData.cigCaja);
+                    if (window._normalizarCigCaja) window._normalizarCigCaja(window.cigCaja);
+                }
+                changed = true;
+            }
+            if (fbData.cigCompras) { window.cigCompras.splice(0, window.cigCompras.length, ...fbData.cigCompras);
+                changed = true; }
+            if (fbData.cigMovimientosStock) { window.cigMovimientosStock.splice(0, window.cigMovimientosStock.length, ...fbData.cigMovimientosStock);
+                changed = true; }
+            if (fbData.subeCargas) { window.subeCargas.splice(0, window.subeCargas.length, ...fbData.subeCargas);
                 changed = true; }
 
             if (changed) {
@@ -10294,6 +10520,995 @@ function refreshCurrentTab() {
             updatingFromFirebase = false;
         });
 
+        // ========================================================================
+        //  MÓDULO PROFESIONAL CIGARRILLOS - Caja separada, Stock, Compras, Ganancias, Estadísticas
+        // ========================================================================
+
+        // ---------- DATA LAYER ----------
+        // cigCaja, cigCompras, cigMovimientosStock declared at top with var
+
+        function getCigConfig() {
+            return JSON.parse(localStorage.getItem(PREF + 'cigConfig') || JSON.stringify({ atadosPorCarton: 10 }));
+        }
+        function saveCigConfig(cfg) { localStorage.setItem(PREF + 'cigConfig', JSON.stringify(cfg)); }
+        function saveCigCaja() { localStorage.setItem(PREF + 'cigCaja', JSON.stringify(cigCaja)); }
+        function saveCigCompras() { localStorage.setItem(PREF + 'cigCompras', JSON.stringify(cigCompras)); }
+        function saveCigMovimientosStock() { localStorage.setItem(PREF + 'cigMovimientosStock', JSON.stringify(cigMovimientosStock)); }
+
+        function tieneProductosCigarrillos() {
+            return productos.some(p => esProductoCigarrillo(p));
+        }
+        function esItemCigarrillo(item) {
+            let prod = productos.find(p => p.id === item.id);
+            return prod && esProductoCigarrillo(prod);
+        }
+        function getProductosCigarrillos() {
+            return productos.filter(p => esProductoCigarrillo(p));
+        }
+        function getVentasCigarrillos() {
+            return ventas.filter(v => {
+                if (!v.devuelta && v.desglose && v.desglose.cigarrillos > 0) return true;
+                if (!v.devuelta && v.items) return v.items.some(item => esItemCigarrillo(item));
+                return false;
+            });
+        }
+
+        // Stock helpers
+        function getCigStock(p) {
+            return {
+                atados: p.stockAtados !== undefined ? p.stockAtados : (p.stock || 0),
+                cartones: p.stockCartones !== undefined ? p.stockCartones : 0,
+                minimo: p.stockMinimo !== undefined ? p.stockMinimo : 0,
+                atadosPorCarton: p.atadosPorCarton || getCigConfig().atadosPorCarton
+            };
+        }
+        function getTotalAtados(p) { const s = getCigStock(p); return s.atados + s.cartones * s.atadosPorCarton; }
+        function productHasMinStock(p) { const s = getCigStock(p); return s.minimo > 0 && getTotalAtados(p) <= s.minimo; }
+
+        // ---------- CIGARRILLO CAJA ----------
+        function actualizarCigCajaSaldo() {
+            let ef = 0, tr = 0;
+            for (let m of cigCaja.movimientos) {
+                if (m.tipo === 'ingreso') { if (m.metodo === 'efectivo') ef += m.monto; else tr += m.monto; }
+                else if (m.tipo === 'retiro' || m.tipo === 'transferencia') { if (m.metodo === 'efectivo') ef -= m.monto; else tr -= m.monto; }
+            }
+            cigCaja.efectivo = Math.round(ef * 100) / 100;
+            cigCaja.transferencia = Math.round(tr * 100) / 100;
+        }
+
+        function abrirCigCaja(ef, tr) {
+            if (cigCaja.apertura) { toast("La caja de cigarrillos ya está abierta", true); return false; }
+            if (ef < 0 || tr < 0) { toast("Montos no negativos", true); return false; }
+            if (cigCaja.movimientos.length > 0) {
+                if (!confirm("Hay movimientos sin cerrar. Se guardará un cierre automático. ¿Continuar?")) return false;
+                if (!cigCaja.cierres) cigCaja.cierres = [];
+                cigCaja.cierres.push({
+                    fecha: new Date().toISOString(),
+                    esperado: (cigCaja.efectivo || 0) + (cigCaja.transferencia || 0),
+                    real: (cigCaja.efectivo || 0) + (cigCaja.transferencia || 0),
+                    efEsperado: cigCaja.efectivo || 0, trEsperado: cigCaja.transferencia || 0,
+                    efReal: cigCaja.efectivo || 0, trReal: cigCaja.transferencia || 0,
+                    detalle: 'Cierre forzado automático', nota: 'Cierre auto antes de nueva apertura',
+                    ventasDelDia: 0, cantidadVentas: 0, metodosPago: {}
+                });
+            }
+            cigCaja.movimientos = [];
+            cigCaja.efectivo = 0; cigCaja.transferencia = 0;
+            cigCaja.montoAperturaEfectivo = 0; cigCaja.montoAperturaTransferencia = 0;
+            if (ef > 0) cigCaja.movimientos.push({ fecha: new Date().toISOString(), tipo: "ingreso", monto: Math.round(ef * 100) / 100, descripcion: "Apertura caja cigarrillos", metodo: "efectivo" });
+            if (tr > 0) cigCaja.movimientos.push({ fecha: new Date().toISOString(), tipo: "ingreso", monto: Math.round(tr * 100) / 100, descripcion: "Apertura caja cigarrillos", metodo: "transferencia" });
+            cigCaja.apertura = new Date().toISOString();
+            cigCaja.cerradaEn = null;
+            cigCaja.montoAperturaEfectivo = Math.round(ef * 100) / 100;
+            cigCaja.montoAperturaTransferencia = Math.round(tr * 100) / 100;
+            cigCaja._version = Date.now() + Math.random();
+            actualizarCigCajaSaldo(); saveCigCaja();
+            toast("Caja cigarrillos abierta con $" + ef.toFixed(2) + " efectivo + $" + tr.toFixed(2) + " transf");
+            return true;
+        }
+
+        function cigCajaTieneMovsHoy() {
+            const hoy = toLocalDateStr(new Date());
+            return cigCaja.movimientos.some(m => toLocalDateStr(m.fecha) === hoy);
+        }
+
+        async function cerrarCigCajaConArqueo() {
+            if (!cigCaja.apertura) { toast("Caja cigarrillos ya cerrada", true); return; }
+            actualizarCigCajaSaldo();
+            const esperadoEf = cigCaja.efectivo, esperadoTr = cigCaja.transferencia, esperadoTotal = esperadoEf + esperadoTr;
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-card" style="max-width:520px;">
+                    <h3>🚬 Cierre Caja Cigarrillos</h3>
+                    <p style="font-size:0.9rem; color:var(--text-muted);">Declara los montos reales:</p>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div><label>💰 Efectivo esperado: <strong>$${esperadoEf.toFixed(2)}</strong></label>
+                            <input type="number" id="cigArqueoEf" step="0.01" min="0" value="${esperadoEf.toFixed(2)}"></div>
+                        <div><label>💳 Transf. esperada: <strong>$${esperadoTr.toFixed(2)}</strong></label>
+                            <input type="number" id="cigArqueoTr" step="0.01" min="0" value="${esperadoTr.toFixed(2)}"></div>
+                    </div>
+                    <div id="cigDiffArqueo" style="margin:10px 0; font-weight:700;"></div>
+                    <label>Nota:</label><input type="text" id="cigNotaCierre" style="width:100%;">
+                    <div style="display:flex; gap:14px; margin-top:18px;">
+                        <button id="cigConfirmarCierre" class="btn btn-primary">Cerrar</button>
+                        <button id="cigCancelarCierre" class="btn btn-outline">Cancelar</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            function calcDiff() {
+                const efR = parseFloat(document.getElementById('cigArqueoEf').value) || 0;
+                const trR = parseFloat(document.getElementById('cigArqueoTr').value) || 0;
+                const diff = (efR + trR) - esperadoTotal;
+                document.getElementById('cigDiffArqueo').innerHTML = diff === 0 ? '✅ Coincide' : (diff > 0 ? '⚠️ Sobran $' + diff.toFixed(2) : '⚠️ Faltan $' + Math.abs(diff).toFixed(2));
+                return { efR, trR, diff };
+            }
+            document.getElementById('cigArqueoEf').oninput = calcDiff;
+            document.getElementById('cigArqueoTr').oninput = calcDiff;
+            calcDiff();
+            document.getElementById('cigConfirmarCierre').onclick = () => {
+                const { efR, trR, diff } = calcDiff();
+                const nota = document.getElementById('cigNotaCierre').value.trim();
+                if (!cigCaja.cierres) cigCaja.cierres = [];
+                const cierre = {
+                    fecha: new Date().toISOString(), esperado: esperadoTotal, real: efR + trR,
+                    efEsperado: esperadoEf, trEsperado: esperadoTr, efReal: efR, trReal: trR,
+                    detalle: 'Ef: $' + esperadoEf.toFixed(2) + '→$' + efR.toFixed(2) + ' | Tr: $' + esperadoTr.toFixed(2) + '→$' + trR.toFixed(2),
+                    nota, ventasDelDia: 0, cantidadVentas: 0, metodosPago: {}
+                };
+                if (Math.abs(diff) > 0.001 && confirm('¿Registrar ajuste de $' + Math.abs(diff).toFixed(2) + '?')) {
+                    const t = diff > 0 ? 'retiro' : 'ingreso';
+                    cigCaja.movimientos.push({ fecha: new Date().toISOString(), tipo: t, monto: Math.abs(diff), descripcion: 'Ajuste arqueo cigarrillos', metodo: 'efectivo' });
+                    cierre.ajuste = { tipo: t, monto: Math.abs(diff) };
+                    actualizarCigCajaSaldo();
+                }
+                cigCaja.cierres.push(cierre);
+                cigCaja.apertura = null; cigCaja.cerradaEn = new Date().toISOString(); cigCaja.montoAperturaEfectivo = 0; cigCaja.montoAperturaTransferencia = 0;
+                cigCaja.efectivo = 0; cigCaja.transferencia = 0; cigCaja.movimientos = [];
+                cigCaja._version = Date.now() + Math.random();
+                saveCigCaja(); modal.remove(); renderCigarrillos();
+                toast("🚬 Caja cigarrillos cerrada");
+            };
+            document.getElementById('cigCancelarCierre').onclick = () => modal.remove();
+        }
+
+        function transferirCigACajaGeneral(monto, metodo) {
+            if (!cigCaja.apertura) { toast("Caja cigarrillos cerrada", true); return false; }
+            if (monto <= 0) { toast("Monto inválido", true); return false; }
+            const disponible = metodo === 'efectivo' ? cigCaja.efectivo : cigCaja.transferencia;
+            if (monto > disponible) { toast("No hay suficiente saldo en cigarrillos", true); return false; }
+            cigCaja.movimientos.push({ fecha: new Date().toISOString(), tipo: 'transferencia', monto, descripcion: 'Transferencia a Caja General', metodo });
+            if (!caja.apertura) {
+                if (!confirm("La caja general está cerrada. ¿Abrirla con $" + monto.toFixed(2) + "?")) return false;
+                abrirCaja(metodo === 'efectivo' ? monto : 0, metodo === 'transferencia' ? monto : 0);
+                toast("Caja general abierta con la transferencia");
+            } else {
+                caja.movimientos.push({ fecha: new Date().toISOString(), tipo: 'ingreso', monto, descripcion: 'Transferencia desde Caja Cigarrillos', metodo });
+                actualizarSaldoCaja(); saveAll();
+            }
+            if (!cigCaja.transferenciasACajaGeneral) cigCaja.transferenciasACajaGeneral = [];
+            cigCaja.transferenciasACajaGeneral.push({ fecha: new Date().toISOString(), monto, metodo });
+            actualizarCigCajaSaldo(); saveCigCaja(); renderCigarrillos();
+            toast("✅ Transferidos $" + monto.toFixed(2) + " a caja general");
+            return true;
+        }
+
+        // ---------- MAIN RENDER ----------
+        function renderCigarrillos() {
+            const subTabs = [
+                { id: 'dashboard', icon: '📊', label: 'Dashboard' },
+                { id: 'caja', icon: '💰', label: 'Caja' },
+                { id: 'stock', icon: '📦', label: 'Stock' },
+                { id: 'compras', icon: '🛒', label: 'Compras' },
+                { id: 'ganancias', icon: '📈', label: 'Ganancias' },
+                { id: 'estadisticas', icon: '📊', label: 'Estadísticas' }
+            ];
+            const activeSub = localStorage.getItem('cigSubTab') || 'dashboard';
+            const cigProducts = getProductosCigarrillos();
+            const cigVentas = getVentasCigarrillos();
+            const html = `
+                <div class="cigarrillos-container">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:16px;">
+                        <h2 style="font-family:'Syne',sans-serif;">🚬 MÓDULO CIGARRILLOS</h2>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <span class="badge" style="background:var(--primary);color:white;">${cigProducts.length} productos</span>
+                            <span class="badge" style="background:var(--accent);color:black;">${cigVentas.length} ventas</span>
+                            <span class="badge" style="background:${cigCaja.apertura ? 'var(--success)' : 'var(--danger)'};color:white;">Caja ${cigCaja.apertura ? 'Abierta' : 'Cerrada'}</span>
+                        </div>
+                    </div>
+                    <div class="category-filters" style="margin-bottom:16px;">
+                        ${subTabs.map(st => `<div class="category-chip ${activeSub === st.id ? 'active' : ''}" data-subtab="${st.id}">${st.icon} ${st.label}</div>`).join('')}
+                    </div>
+                    <div id="cigSubContent"></div>
+                </div>
+            `;
+            document.getElementById("cigarrillos").innerHTML = html;
+            document.querySelectorAll('[data-subtab]').forEach(el => {
+                el.addEventListener('click', () => {
+                    localStorage.setItem('cigSubTab', el.dataset.subtab);
+                    renderCigarrillos();
+                });
+            });
+            // Render active sub-tab
+            switch (activeSub) {
+                case 'caja': renderCigCajaSection(cigProducts, cigVentas); break;
+                case 'stock': renderCigStockSection(cigProducts, cigVentas); break;
+                case 'compras': renderCigComprasSection(cigProducts, cigVentas); break;
+                case 'ganancias': renderCigGananciasSection(cigProducts, cigVentas); break;
+                case 'estadisticas': renderCigEstadisticasSection(cigProducts, cigVentas); break;
+                default: renderCigDashboardSection(cigProducts, cigVentas); break;
+            }
+        }
+
+        // ---------- DASHBOARD ----------
+        function renderCigDashboardSection(cigProducts, cigVentas) {
+            const cigIds = cigProducts.map(p => p.id);
+            const hoy = toLocalDateStr(new Date());
+            const totalVentas = cigVentas.reduce((s, v) => s + v.total, 0);
+            const totalGanancia = cigVentas.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const totalUnidades = cigVentas.reduce((s, v) => { let u = 0; v.items.forEach(i => { if (cigIds.includes(i.id) || esItemCigarrillo(i)) u += i.cantidad; }); return s + u; }, 0);
+            const ventasHoy = cigVentas.filter(v => toLocalDateStr(new Date(v.fecha)) === hoy);
+            const totalHoy = ventasHoy.reduce((s, v) => s + v.total, 0);
+            const gananciaHoy = ventasHoy.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const stockTotalAtados = cigProducts.reduce((s, p) => s + getTotalAtados(p), 0);
+            const margen = totalVentas > 0 ? (totalGanancia / totalVentas * 100) : 0;
+            const periodoActivo = parseInt(localStorage.getItem('cigStatsPeriod') || '30');
+            const fechaInicio = new Date(); fechaInicio.setDate(fechaInicio.getDate() - periodoActivo); fechaInicio.setHours(0,0,0,0);
+            const ventasStats = cigVentas.filter(v => new Date(v.fecha) >= fechaInicio);
+            const totalStats = ventasStats.reduce((s, v) => s + v.total, 0);
+            const gananciaStats = ventasStats.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const ticketProm = ventasStats.length ? totalStats / ventasStats.length : 0;
+            const ultimasVentas = cigVentas.slice(0, 20);
+            const movCig = cigCaja.movimientos.filter(m => toLocalDateStr(new Date(m.fecha)) === hoy);
+            const totalIngresosCigHoy = movCig.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0);
+            const cigEf = cigCaja.efectivo || 0;
+            const cigTr = cigCaja.transferencia || 0;
+            const enAlerta = cigProducts.filter(p => productHasMinStock(p));
+
+            const html = `
+                <div class="stats-kpi-grid" style="margin-bottom:16px;">
+                    <div class="kpi-card"><div class="kpi-title">💰 Ventas totales</div><div class="kpi-value">$${totalVentas.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📈 Ganancia neta</div><div class="kpi-value">$${totalGanancia.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📊 Margen</div><div class="kpi-value">${margen.toFixed(1)}%</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📦 Total atados</div><div class="kpi-value">${stockTotalAtados}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">🎫 Ticket prom.</div><div class="kpi-value">$${ticketProm.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💰 Caja cig.</div><div class="kpi-value">$${(cigEf + cigTr).toFixed(2)}</div></div>
+                </div>
+                ${enAlerta.length ? `<div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:12px;padding:12px;margin-bottom:16px;"><strong>⚠️ Stock mínimo agotado:</strong> ${enAlerta.map(p => escapeHtml(p.nombre)).join(', ')}</div>` : ''}
+                <div class="stats-kpi-grid" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+                    <div class="kpi-card" style="background:var(--accent-light);border:2px solid var(--accent);"><div class="kpi-title">💰 Ventas HOY</div><div class="kpi-value" style="color:var(--text);">$${totalHoy.toFixed(2)}</div></div>
+                    <div class="kpi-card" style="background:var(--accent-light);border:2px solid var(--accent);"><div class="kpi-title">📈 Ganancia HOY</div><div class="kpi-value" style="color:var(--text);">$${gananciaHoy.toFixed(2)}</div></div>
+                    <div class="kpi-card" style="background:var(--accent-light);border:2px solid var(--accent);"><div class="kpi-title">💰 Efectivo cig.</div><div class="kpi-value" style="color:var(--text);">$${cigEf.toFixed(2)}</div></div>
+                    <div class="kpi-card" style="background:var(--accent-light);border:2px solid var(--accent);"><div class="kpi-title">💳 Transf. cig.</div><div class="kpi-value" style="color:var(--text);">$${cigTr.toFixed(2)}</div></div>
+                </div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
+                    <button id="cigPeriod7" class="btn ${periodoActivo===7?'btn-primary':'btn-outline'}">7d</button>
+                    <button id="cigPeriod15" class="btn ${periodoActivo===15?'btn-primary':'btn-outline'}">15d</button>
+                    <button id="cigPeriod30" class="btn ${periodoActivo===30?'btn-primary':'btn-outline'}">30d</button>
+                    <button id="cigPeriod90" class="btn ${periodoActivo===90?'btn-primary':'btn-outline'}">90d</button>
+                </div>
+                <div class="charts-grid" style="margin-bottom:20px;">
+                    <div class="chart-container"><h4>📈 Tendencia ventas cigarrillos</h4><canvas id="cigLineChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>💳 Métodos de pago cigarrillos</h4><canvas id="cigPieChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>🏆 Top productos cigarrillos</h4><canvas id="cigBarChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>📊 Ganancia vs Ventas cigarrillos</h4><canvas id="cigDualChart" width="400" height="200"></canvas></div>
+                </div>
+                <div style="margin-bottom:20px;">
+                    <h4>💰 Movimientos caja cigarrillos - HOY</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Hora</th><th>Tipo</th><th>Monto</th><th>Desc</th><th>Método</th></tr></thead>
+                            <tbody>${movCig.length ? movCig.map(m => `<tr><td>${new Date(m.fecha).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})}</td><td><span class="badge ${m.tipo==='ingreso'?'badge-success':'badge-danger'}">${m.tipo}</span></td><td>$${m.monto.toFixed(2)}</td><td>${escapeHtml(m.descripcion)}</td><td>${escapeHtml(m.metodo||'-')}</td></tr>`).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Sin movimientos hoy</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <h4>📜 Últimas ventas cigarrillos</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Fecha</th><th>Total</th><th>🚬 Cig.</th><th>Ganancia</th><th>Método</th></tr></thead>
+                            <tbody>${ultimasVentas.map(v => {
+                                const f = new Date(v.fecha).toLocaleString('es',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+                                const cigT = v.desglose ? v.desglose.cigarrillos : v.items.filter(i => cigIds.includes(i.id)||esItemCigarrillo(i)).reduce((s,i) => s + i.subtotal, 0);
+                                return `<tr><td>${f}</td><td>$${v.total.toFixed(2)}</td><td style="color:var(--primary);font-weight:700;">$${cigT.toFixed(2)}</td><td>$${(v.ganancia||0).toFixed(2)}</td><td>${v.metodoPago||'Efectivo'}</td></tr>`;
+                            }).join('')}${ultimasVentas.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Sin ventas aún</td></tr>' : ''}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            [7,15,30,90].forEach(d => {
+                const el = document.getElementById('cigPeriod'+d);
+                if (el) el.onclick = () => { localStorage.setItem('cigStatsPeriod', d); renderCigarrillos(); };
+            });
+            renderCigCharts(cigVentas, cigProducts, periodoActivo);
+        }
+
+        // ---------- CAJA SEPARADA ----------
+        function renderCigCajaSection() {
+            const hoy = toLocalDateStr(new Date());
+            const estado = cigCaja.apertura ? 'Abierta desde ' + new Date(cigCaja.apertura).toLocaleString() : 'Cerrada';
+            const esHoy = true;
+            const mostrarAbrir = !cigCaja.apertura;
+            const ef = cigCaja.efectivo || 0;
+            const tr = cigCaja.transferencia || 0;
+            const total = ef + tr;
+            const movs = cigCaja.movimientos.filter(m => toLocalDateStr(m.fecha) === hoy);
+            const cierres = (cigCaja.cierres || []).slice().reverse();
+
+            const html = `
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+                    <h3>💰 Caja Cigarrillos</h3>
+                    <span style="font-weight:700;background:var(--surface2);padding:6px 14px;border-radius:12px;">${estado}</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin-bottom:16px;">
+                    <div class="kpi-card"><div class="kpi-title">💰 Efectivo cig.</div><div class="kpi-value">$${ef.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💳 Transferencia cig.</div><div class="kpi-value">$${tr.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💵 Total cig.</div><div class="kpi-value">$${total.toFixed(2)}</div></div>
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+                    ${mostrarAbrir ? `<button id="cigAbrirCajaBtn" class="btn btn-success">🔓 Abrir Caja Cigarrillos</button>` : `
+                        <button id="cigCerrarCajaBtn" class="btn btn-danger">🔒 Cerrar Caja Cigarrillos</button>
+                        <button id="cigTransferirBtn" class="btn btn-warning">📤 Transferir a Caja General</button>
+                        <button id="cigMovManualBtn" class="btn btn-primary">➕ Movimiento manual</button>
+                    `}
+                </div>
+                <div style="margin-bottom:20px;">
+                    <h4>📋 Movimientos - HOY</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Hora</th><th>Tipo</th><th>Monto</th><th>Descripción</th><th>Método</th></tr></thead>
+                            <tbody>${movs.length ? movs.map(m => `<tr><td>${new Date(m.fecha).toLocaleTimeString()}</td><td>${m.tipo==='ingreso'?'📈 Ingreso':m.tipo==='retiro'?'📉 Retiro':'📤 Transf'}</td><td>$${m.monto.toFixed(2)}</td><td>${escapeHtml(m.descripcion)}</td><td>${m.metodo||'-'}</td></tr>`).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Sin movimientos hoy</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <h4>📋 Historial cierres cigarrillos</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Fecha</th><th>Esperado</th><th>Real</th><th>Dif.</th></tr></thead>
+                            <tbody>${cierres.length ? cierres.map(c => {
+                                const d = c.real - c.esperado;
+                                return `<tr><td>${new Date(c.fecha).toLocaleString()}</td><td>$${(c.esperado||0).toFixed(2)}</td><td>$${(c.real||0).toFixed(2)}</td><td style="color:${d===0?'var(--success)':d>0?'var(--warning)':'var(--danger)'}">${d>=0?'+':''}$${d.toFixed(2)}</td></tr>`;
+                            }).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);">Sin cierres</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            document.getElementById("cigAbrirCajaBtn")?.addEventListener("click", () => {
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>🔓 Abrir Caja Cigarrillos</h3>
+                    <label>Efectivo inicial</label><input type="number" id="cigAbrirEf" step="0.01" min="0" value="0">
+                    <label>Transferencia inicial</label><input type="number" id="cigAbrirTr" step="0.01" min="0" value="0">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigAbrirConfirm" class="btn btn-primary">Abrir</button><button id="cigAbrirCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigAbrirConfirm').onclick = () => {
+                    if (abrirCigCaja(parseFloat(document.getElementById('cigAbrirEf').value)||0, parseFloat(document.getElementById('cigAbrirTr').value)||0)) { m.remove(); renderCigarrillos(); }
+                };
+                document.getElementById('cigAbrirCancel').onclick = () => m.remove();
+            });
+            document.getElementById("cigCerrarCajaBtn")?.addEventListener("click", cerrarCigCajaConArqueo);
+            document.getElementById("cigTransferirBtn")?.addEventListener("click", () => {
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>📤 Transferir a Caja General</h3>
+                    <select id="cigTransfMetodo"><option value="efectivo">💰 Efectivo</option><option value="transferencia">💳 Transferencia</option></select>
+                    <label>Saldo disponible: $<span id="cigTransfSaldo">${ef.toFixed(2)}</span></label>
+                    <input type="number" id="cigTransfMonto" step="0.01" min="0" value="${ef.toFixed(2)}">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigTransfConfirm" class="btn btn-primary">Transferir</button><button id="cigTransfCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                function updSaldo() {
+                    const met = document.getElementById('cigTransfMetodo').value;
+                    document.getElementById('cigTransfSaldo').textContent = (met==='efectivo' ? cigCaja.efectivo : cigCaja.transferencia).toFixed(2);
+                    document.getElementById('cigTransfMonto').value = (met==='efectivo' ? cigCaja.efectivo : cigCaja.transferencia).toFixed(2);
+                }
+                document.getElementById('cigTransfMetodo').onchange = updSaldo; updSaldo();
+                document.getElementById('cigTransfConfirm').onclick = () => {
+                    const met = document.getElementById('cigTransfMetodo').value;
+                    const monto = parseFloat(document.getElementById('cigTransfMonto').value) || 0;
+                    if (transferirCigACajaGeneral(monto, met)) m.remove();
+                };
+                document.getElementById('cigTransfCancel').onclick = () => m.remove();
+            });
+            document.getElementById("cigMovManualBtn")?.addEventListener("click", () => {
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>➕ Movimiento manual</h3>
+                    <select id="cigMovTipo"><option value="ingreso">Ingreso</option><option value="retiro">Retiro</option></select>
+                    <select id="cigMovMetodo"><option value="efectivo">💰 Efectivo</option><option value="transferencia">💳 Transferencia</option></select>
+                    <input type="number" id="cigMovMonto" step="0.01" min="0" placeholder="Monto">
+                    <input type="text" id="cigMovDesc" placeholder="Descripción">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigMovGuardar" class="btn btn-primary">Guardar</button><button id="cigMovCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigMovGuardar').onclick = () => {
+                    const tipo = document.getElementById('cigMovTipo').value;
+                    const metodo = document.getElementById('cigMovMetodo').value;
+                    const monto = parseFloat(document.getElementById('cigMovMonto').value);
+                    const desc = document.getElementById('cigMovDesc').value.trim() || 'Mov manual';
+                    if (isNaN(monto) || monto <= 0) { toast("Monto inválido", true); return; }
+                    cigCaja.movimientos.push({ fecha: new Date().toISOString(), tipo, monto: Math.round(monto*100)/100, descripcion: desc, metodo });
+                    actualizarCigCajaSaldo(); saveCigCaja(); m.remove(); renderCigarrillos();
+                    toast("Movimiento registrado en caja cigarrillos");
+                };
+                document.getElementById('cigMovCancel').onclick = () => m.remove();
+            });
+        }
+
+        // ---------- STOCK ----------
+        function renderCigStockSection(cigProducts) {
+            const cigConfig = getCigConfig();
+            const enAlerta = cigProducts.filter(p => productHasMinStock(p));
+            const movs = cigMovimientosStock.slice().reverse().slice(0, 50);
+
+            const html = `
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+                    <h3>📦 Stock cigarrillos</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button id="cigStockConfigBtn" class="btn btn-outline">⚙️ Config (${cigConfig.atadosPorCarton} atados/cartón)</button>
+                        <button id="cigStockAjusteBtn" class="btn btn-warning">📝 Ajuste de stock</button>
+                        <button id="cigStockConversionBtn" class="btn btn-info">🔄 Convertir cartones ⇄ atados</button>
+                    </div>
+                </div>
+                ${enAlerta.length ? `<div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:12px;padding:12px;margin-bottom:16px;"><strong>⚠️ Reponer stock:</strong> ${enAlerta.map(p => escapeHtml(p.nombre)+' ('+getTotalAtados(p)+' atados)').join(', ')}</div>` : ''}
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-bottom:20px;">
+                    ${cigProducts.map(p => {
+                        const s = getCigStock(p);
+                        const totalAt = getTotalAtados(p);
+                        const crit = s.minimo > 0 && totalAt <= s.minimo;
+                        const totalAtadosEnCartones = s.cartones * s.atadosPorCarton;
+                        return `
+                            <div class="product-card" style="background:var(--surface2);border-radius:12px;padding:14px;border:1px solid ${crit ? 'var(--danger)' : 'var(--border)'};${crit ? 'box-shadow:0 0 0 2px var(--danger);' : ''}">
+                                <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                                    <span style="font-size:2rem;">${p.emoji||'🚬'}</span>
+                                    <div style="text-align:right;">
+                                        <div class="stock-badge ${crit?'stock-critical':''}">${totalAt} atados</div>
+                                        ${s.minimo > 0 ? `<div style="font-size:0.75rem;color:var(--text-muted);">Mín: ${s.minimo}</div>` : ''}
+                                    </div>
+                                </div>
+                                <div style="font-weight:700;font-size:1.05rem;margin:8px 0 4px;">${escapeHtml(p.nombre)}</div>
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:0.9rem;">
+                                    <span>📦 Cartones: <strong>${s.cartones}</strong></span>
+                                    <span>📄 Atados: <strong>${s.atados}</strong></span>
+                                    <span>📊 Total atados: <strong>${totalAt}</strong></span>
+                                    <span>🔢 Atados/cartón: <strong>${s.atadosPorCarton}</strong></span>
+                                </div>
+                                <div style="display:flex;gap:6px;margin-top:10px;">
+                                    <button class="btn btn-sm btn-primary" onclick="agregarAlCarrito(${p.id})">➕ Vender</button>
+                                    <button class="btn btn-sm btn-outline" onclick="editarProductoModal(${p.id})">✏️</button>
+                                    <button class="btn btn-sm btn-success" onclick="cigStockEntrada(${p.id})">📦 +Stock</button>
+                                </div>
+                            </div>`;
+                    }).join('')}
+                    ${cigProducts.length === 0 ? '<p style="color:var(--text-muted);">No hay productos con categoría cigarrillos</p>' : ''}
+                </div>
+                <div>
+                    <h4>📋 Historial movimientos stock</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Fecha</th><th>Producto</th><th>Tipo</th><th>Cartones</th><th>Atados</th><th>Descripción</th></tr></thead>
+                            <tbody>${movs.length ? movs.map(m => `<tr><td>${new Date(m.fecha).toLocaleString()}</td><td>${escapeHtml(m.productoNombre)}</td><td><span class="badge ${m.tipo==='compra'?'badge-success':m.tipo==='venta'?'badge-primary':m.tipo==='conversion'?'badge-warning':'badge-secondary'}">${m.tipo}</span></td><td>${m.cartones||0}</td><td>${m.atados||0}</td><td>${escapeHtml(m.descripcion||'')}</td></tr>`).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">Sin movimientos</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            document.getElementById("cigStockConfigBtn")?.addEventListener("click", () => {
+                const cfg = getCigConfig();
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>⚙️ Configuración stock</h3>
+                    <label>Atados por cartón</label>
+                    <input type="number" id="cigAtadosPorCarton" value="${cfg.atadosPorCarton}" min="1" step="1">
+                    <p style="font-size:0.85rem;color:var(--text-muted);">Este valor se usa como predeterminado. Cada producto puede tener su propio valor.</p>
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigConfigGuardar" class="btn btn-primary">Guardar</button><button id="cigConfigCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigConfigGuardar').onclick = () => {
+                    const v = parseInt(document.getElementById('cigAtadosPorCarton').value) || 10;
+                    saveCigConfig({ atadosPorCarton: v }); m.remove(); renderCigarrillos();
+                    toast("Config guardada: " + v + " atados/cartón");
+                };
+                document.getElementById('cigConfigCancel').onclick = () => m.remove();
+            });
+            document.getElementById("cigStockAjusteBtn")?.addEventListener("click", () => {
+                const opts = cigProducts.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join('');
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>📝 Ajuste de stock</h3>
+                    <select id="cigAjusteProd">${opts}</select>
+                    <label>Nuevo stock - Cartones:</label><input type="number" id="cigAjusteCartones" step="1" min="0" value="0">
+                    <label>Nuevo stock - Atados:</label><input type="number" id="cigAjusteAtados" step="1" min="0" value="0">
+                    <label>Motivo:</label><input type="text" id="cigAjusteMotivo" placeholder="Ej: inventario físico">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigAjusteGuardar" class="btn btn-primary">Guardar</button><button id="cigAjusteCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigAjusteGuardar').onclick = () => {
+                    const id = parseInt(document.getElementById('cigAjusteProd').value);
+                    const cart = parseInt(document.getElementById('cigAjusteCartones').value) || 0;
+                    const at = parseInt(document.getElementById('cigAjusteAtados').value) || 0;
+                    const motivo = document.getElementById('cigAjusteMotivo').value.trim() || 'Ajuste manual';
+                    const prod = productos.find(p => p.id === id);
+                    if (!prod) return;
+                    const oldS = getCigStock(prod);
+                    prod.stockCartones = cart; prod.stockAtados = at;
+                    cigMovimientosStock.push({ fecha: new Date().toISOString(), productoId: id, productoNombre: prod.nombre, tipo: 'ajuste', cartones: cart - oldS.cartones, atados: at - oldS.atados, descripcion: motivo });
+                    saveAll(); saveCigMovimientosStock(); m.remove(); renderCigarrillos();
+                    toast("Stock ajustado: " + prod.nombre);
+                };
+                document.getElementById('cigAjusteCancel').onclick = () => m.remove();
+            });
+            document.getElementById("cigStockConversionBtn")?.addEventListener("click", () => {
+                const opts = cigProducts.map(p => {
+                    const s = getCigStock(p);
+                    return `<option value="${p.id}">${escapeHtml(p.nombre)} (${s.cartones} cart. / ${s.atados} at.)</option>`;
+                }).join('');
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card"><h3>🔄 Convertir cartones ⇄ atados</h3>
+                    <select id="cigConvProd">${opts}</select>
+                    <label>Dirección:</label>
+                    <select id="cigConvDir"><option value="a2c">Atados → Cartones</option><option value="c2a">Cartones → Atados</option></select>
+                    <label>Cantidad de atados a convertir:</label><input type="number" id="cigConvCant" step="1" min="1" value="10">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigConvGuardar" class="btn btn-primary">Convertir</button><button id="cigConvCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigConvGuardar').onclick = () => {
+                    const id = parseInt(document.getElementById('cigConvProd').value);
+                    const dir = document.getElementById('cigConvDir').value;
+                    const cant = parseInt(document.getElementById('cigConvCant').value) || 0;
+                    const prod = productos.find(p => p.id === id);
+                    if (!prod || cant <= 0) { toast("Inválido", true); return; }
+                    const s = getCigStock(prod);
+                    const apc = s.atadosPorCarton;
+                    if (dir === 'a2c') {
+                        const needed = cant;
+                        if (s.atados < needed) { toast("No hay suficientes atados", true); return; }
+                        const newCart = Math.floor(cant / apc);
+                        const restAt = cant % apc;
+                        prod.stockAtados = s.atados - cant;
+                        prod.stockCartones = (s.cartones || 0) + newCart;
+                        const sobrantes = restAt;
+                        if (sobrantes > 0) prod.stockAtados += sobrantes;
+                        cigMovimientosStock.push({ fecha: new Date().toISOString(), productoId: id, productoNombre: prod.nombre, tipo: 'conversion', cartones: newCart, atados: -(cant - restAt), descripcion: 'Convertido ' + cant + ' at. → ' + newCart + ' cart.' + (restAt ? ' (sobraron ' + restAt + ' at.)' : '') });
+                    } else {
+                        const needed = cant;
+                        if ((s.cartones || 0) < needed) { toast("No hay suficientes cartones", true); return; }
+                        const newAt = needed * apc;
+                        prod.stockCartones = (s.cartones || 0) - needed;
+                        prod.stockAtados = (s.atados || 0) + newAt;
+                        cigMovimientosStock.push({ fecha: new Date().toISOString(), productoId: id, productoNombre: prod.nombre, tipo: 'conversion', cartones: -needed, atados: newAt, descripcion: 'Convertido ' + needed + ' cart. → ' + newAt + ' at.' });
+                    }
+                    saveAll(); saveCigMovimientosStock(); m.remove(); renderCigarrillos();
+                    toast("Conversión realizada");
+                };
+                document.getElementById('cigConvCancel').onclick = () => m.remove();
+            });
+        }
+        window.cigStockEntrada = (id) => {
+            const prod = productos.find(p => p.id === id);
+            if (!prod) return;
+            const s = getCigStock(prod);
+            const m = document.createElement('div'); m.className = 'modal-overlay';
+            m.innerHTML = `<div class="modal-card"><h3>📦 Entrada de stock: ${escapeHtml(prod.nombre)}</h3>
+                <label>Cartones a agregar:</label><input type="number" id="cigEntradaCart" step="1" min="0" value="0">
+                <label>Atados a agregar:</label><input type="number" id="cigEntradaAt" step="1" min="0" value="0">
+                <label>Precio de compra por atado ($):</label><input type="number" id="cigEntradaPrecio" step="0.01" min="0" value="${prod.costo || 0}">
+                <label>Nota:</label><input type="text" id="cigEntradaNota" placeholder="Proveedor, factura, etc.">
+                <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigEntradaGuardar" class="btn btn-primary">Agregar</button><button id="cigEntradaCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+            document.body.appendChild(m);
+            document.getElementById('cigEntradaGuardar').onclick = () => {
+                const cart = parseInt(document.getElementById('cigEntradaCart').value) || 0;
+                const at = parseInt(document.getElementById('cigEntradaAt').value) || 0;
+                const precio = parseFloat(document.getElementById('cigEntradaPrecio').value) || 0;
+                const nota = document.getElementById('cigEntradaNota').value.trim() || 'Entrada manual';
+                if (cart <= 0 && at <= 0) { toast("Agrega al menos 1 cartón o atado", true); return; }
+                prod.stockCartones = (prod.stockCartones !== undefined ? prod.stockCartones : 0) + cart;
+                prod.stockAtados = (prod.stockAtados !== undefined ? prod.stockAtados : prod.stock) + at;
+                if (precio > 0) prod.costo = precio;
+                cigMovimientosStock.push({ fecha: new Date().toISOString(), productoId: id, productoNombre: prod.nombre, tipo: 'compra', cartones: cart, atados: at, descripcion: nota + (precio > 0 ? ' - $' + precio.toFixed(2) + '/at' : '') });
+                saveAll(); saveCigMovimientosStock(); m.remove(); renderCigarrillos();
+                toast("Stock agregado: +" + cart + " cart. +" + at + " at.");
+            };
+            document.getElementById('cigEntradaCancel').onclick = () => m.remove();
+        };
+
+        // ---------- COMPRAS ----------
+        function renderCigComprasSection(cigProducts) {
+            const html = `
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+                    <h3>🛒 Compras cigarrillos</h3>
+                    <button id="cigNuevaCompraBtn" class="btn btn-success">➕ Nueva compra</button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table"><thead><tr><th>Fecha</th><th>Proveedor</th><th>Factura</th><th>Producto</th><th>Cart.</th><th>At.</th><th>Precio</th><th>Total</th></tr></thead>
+                        <tbody>${cigCompras.length ? cigCompras.slice().reverse().map(c => {
+                            return `<tr><td>${new Date(c.fecha).toLocaleString()}</td><td>${escapeHtml(c.proveedorNombre||'')}</td><td>${escapeHtml(c.numeroFactura||'-')}</td><td>${escapeHtml(c.productoNombre||'')}</td><td>${c.cartones||0}</td><td>${c.atados||0}</td><td>$${(c.precioUnitario||0).toFixed(2)}</td><td>$${(c.total||0).toFixed(2)}</td></tr>`;
+                        }).join('') : '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);">No hay compras registradas</td></tr>'}</tbody>
+                    </table>
+                </div>
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            document.getElementById("cigNuevaCompraBtn")?.addEventListener("click", () => {
+                const opts = cigProducts.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join('');
+                const provOpts = (proveedores || []).map(p => `<option value="${p.id}">${escapeHtml(p.nombre||p.empresa||'')}</option>`).join('');
+                const m = document.createElement('div'); m.className = 'modal-overlay';
+                m.innerHTML = `<div class="modal-card" style="max-width:500px;"><h3>➕ Nueva compra cigarrillos</h3>
+                    <label>Producto:</label><select id="cigCompraProd">${opts}</select>
+                    <label>Proveedor:</label><select id="cigCompraProv"><option value="">Seleccionar...</option>${provOpts}</select>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <div><label>Cartones:</label><input type="number" id="cigCompraCart" step="1" min="0" value="0"></div>
+                        <div><label>Atados:</label><input type="number" id="cigCompraAt" step="1" min="0" value="0"></div>
+                    </div>
+                    <label>Precio por atado ($):</label><input type="number" id="cigCompraPrecio" step="0.01" min="0">
+                    <label>N° Factura:</label><input type="text" id="cigCompraFactura">
+                    <label>Fecha:</label><input type="date" id="cigCompraFecha" value="${new Date().toISOString().split('T')[0]}">
+                    <label>Nota:</label><input type="text" id="cigCompraNota">
+                    <div style="display:flex;gap:14px;margin-top:18px;"><button id="cigCompraGuardar" class="btn btn-success">Registrar compra</button><button id="cigCompraCancel" class="btn btn-outline">Cancelar</button></div></div>`;
+                document.body.appendChild(m);
+                document.getElementById('cigCompraGuardar').onclick = () => {
+                    const prodId = parseInt(document.getElementById('cigCompraProd').value);
+                    const provId = parseInt(document.getElementById('cigCompraProv').value) || null;
+                    const cart = parseInt(document.getElementById('cigCompraCart').value) || 0;
+                    const at = parseInt(document.getElementById('cigCompraAt').value) || 0;
+                    const precio = parseFloat(document.getElementById('cigCompraPrecio').value) || 0;
+                    const factura = document.getElementById('cigCompraFactura').value.trim();
+                    const fecha = document.getElementById('cigCompraFecha').value;
+                    const nota = document.getElementById('cigCompraNota').value.trim();
+                    if (cart <= 0 && at <= 0) { toast("Agrega cartones o atados", true); return; }
+                    const prod = productos.find(p => p.id === prodId);
+                    if (!prod) return;
+                    const totalAt = cart * (prod.atadosPorCarton || getCigConfig().atadosPorCarton) + at;
+                    const total = totalAt * precio;
+                    const prov = proveedores.find(p => p.id === provId);
+                    const provNombre = prov ? (prov.nombre || prov.empresa || '') : '';
+                    cigCompras.push({ id: Date.now(), fecha: new Date(fecha).toISOString(), proveedorId: provId, proveedorNombre: provNombre, productoId: prodId, productoNombre: prod.nombre, cartones: cart, atados: at, precioUnitario: precio, total, numeroFactura: factura, nota });
+                    prod.stockCartones = (prod.stockCartones !== undefined ? prod.stockCartones : 0) + cart;
+                    prod.stockAtados = (prod.stockAtados !== undefined ? prod.stockAtados : prod.stock) + at;
+                    if (precio > 0) prod.costo = precio;
+                    // Actualizar costo promedio
+                    const s = getCigStock(prod);
+                    const totalStockAt = getTotalAtados(prod);
+                    if (totalStockAt > 0 && precio > 0) {
+                        const costoAnterior = prod.costoPromedio || prod.costo || 0;
+                        const stockAnterior = totalStockAt - totalAt;
+                        if (stockAnterior > 0) {
+                            prod.costoPromedio = ((costoAnterior * stockAnterior) + (precio * totalAt)) / totalStockAt;
+                        } else {
+                            prod.costoPromedio = precio;
+                        }
+                    } else if (precio > 0) {
+                        prod.costoPromedio = precio;
+                    }
+                    prod.ultimoCosto = precio;
+                    cigMovimientosStock.push({ fecha: new Date().toISOString(), productoId: prodId, productoNombre: prod.nombre, tipo: 'compra', cartones: cart, atados: at, descripcion: 'Compra ' + (factura ? 'Fact. ' + factura : '') + (provNombre ? ' ' + provNombre : '') });
+                    saveAll(); saveCigCompras(); saveCigMovimientosStock(); m.remove(); renderCigarrillos();
+                    toast("Compra registrada: " + prod.nombre);
+                };
+                document.getElementById('cigCompraCancel').onclick = () => m.remove();
+            });
+        }
+
+        // ---------- GANANCIAS ----------
+        function renderCigGananciasSection(cigProducts, cigVentas) {
+            const cigIds = cigProducts.map(p => p.id);
+            const periodoActivo = parseInt(localStorage.getItem('cigGananciaPeriod') || '30');
+            const fechaInicio = new Date(); fechaInicio.setDate(fechaInicio.getDate() - periodoActivo); fechaInicio.setHours(0,0,0,0);
+            const ventasFilt = cigVentas.filter(v => new Date(v.fecha) >= fechaInicio);
+            const totalVentas = ventasFilt.reduce((s, v) => s + v.total, 0);
+            const totalGanancia = ventasFilt.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const margen = totalVentas > 0 ? (totalGanancia / totalVentas * 100) : 0;
+
+            // Ganancia por marca
+            let marcaMap = {};
+            ventasFilt.forEach(v => {
+                v.items.forEach(item => {
+                    if (cigIds.includes(item.id) || esItemCigarrillo(item)) {
+                        const p = productos.find(pr => pr.id === item.id);
+                        const marca = (p && p.marca) ? p.marca : (p ? p.nombre : item.nombre);
+                        const gan = (item.precioUnitario - (p?.costo || 0)) * item.cantidad;
+                        if (!marcaMap[marca]) marcaMap[marca] = { ventas: 0, ganancia: 0, unidades: 0, costo: 0 };
+                        marcaMap[marca].ventas += item.subtotal;
+                        marcaMap[marca].ganancia += gan;
+                        marcaMap[marca].unidades += item.cantidad;
+                        marcaMap[marca].costo += (p?.costo || 0) * item.cantidad;
+                    }
+                });
+            });
+            const marcasArr = Object.entries(marcaMap).sort((a, b) => b[1].ganancia - a[1].ganancia);
+
+            // Ganancia diaria
+            let diasMap = new Map();
+            for (let d = new Date(fechaInicio); d <= new Date(); d.setDate(d.getDate() + 1)) {
+                diasMap.set(d.toISOString().split('T')[0], { ventas: 0, ganancia: 0, margen: 0 });
+            }
+            ventasFilt.forEach(v => {
+                const key = new Date(v.fecha).toISOString().split('T')[0];
+                if (diasMap.has(key)) {
+                    const d = diasMap.get(key);
+                    d.ventas += v.total;
+                    d.ganancia += v.ganancia || 0;
+                }
+            });
+
+            const sortedDias = Array.from(diasMap.keys()).sort();
+            const ventasDiarias = sortedDias.map(d => diasMap.get(d).ventas);
+            const gananciasDiarias = sortedDias.map(d => diasMap.get(d).ganancia);
+            const labels = sortedDias.map(d => new Date(d).toLocaleDateString('es', { day: 'numeric', month: 'short' }));
+
+            // Totales semanales/mensuales
+            const totalSemana = ventasFilt.filter(v => { const d = new Date(v.fecha); const now = new Date(); const weekAgo = new Date(now); weekAgo.setDate(weekAgo.getDate() - 7); return d >= weekAgo; });
+            const totalMes = ventasFilt.filter(v => { const d = new Date(v.fecha); const now = new Date(); const monthAgo = new Date(now); monthAgo.setMonth(monthAgo.getMonth() - 1); return d >= monthAgo; });
+            const ganSemana = totalSemana.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const ganMes = totalMes.reduce((s, v) => s + (v.ganancia || 0), 0);
+            const venSemana = totalSemana.reduce((s, v) => s + v.total, 0);
+            const venMes = totalMes.reduce((s, v) => s + v.total, 0);
+
+            // Rentabilidad por proveedor
+            let provMap = {};
+            ventasFilt.forEach(v => {
+                v.items.forEach(item => {
+                    if (cigIds.includes(item.id) || esItemCigarrillo(item)) {
+                        const p = productos.find(pr => pr.id === item.id);
+                        const provId = p?.proveedorId;
+                        const provName = provId ? (proveedores.find(pr => pr.id === provId)?.nombre || proveedores.find(pr => pr.id === provId)?.empresa || 'Sin proveedor') : 'Sin proveedor';
+                        const gan = (item.precioUnitario - (p?.costo || 0)) * item.cantidad;
+                        if (!provMap[provName]) provMap[provName] = { ventas: 0, ganancia: 0, margen: 0 };
+                        provMap[provName].ventas += item.subtotal;
+                        provMap[provName].ganancia += gan;
+                    }
+                });
+            });
+            Object.keys(provMap).forEach(k => { provMap[k].margen = provMap[k].ventas > 0 ? (provMap[k].ganancia / provMap[k].ventas * 100) : 0; });
+
+            const html = `
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                    <button id="cigGan7" class="btn ${periodoActivo===7?'btn-primary':'btn-outline'}">7 días</button>
+                    <button id="cigGan30" class="btn ${periodoActivo===30?'btn-primary':'btn-outline'}">30 días</button>
+                    <button id="cigGan90" class="btn ${periodoActivo===90?'btn-primary':'btn-outline'}">90 días</button>
+                    <button id="cigGanAll" class="btn ${periodoActivo===99999?'btn-primary':'btn-outline'}">Todo</button>
+                </div>
+                <div class="stats-kpi-grid" style="margin-bottom:16px;">
+                    <div class="kpi-card"><div class="kpi-title">💰 Ventas período</div><div class="kpi-value">$${totalVentas.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📈 Ganancia neta</div><div class="kpi-value">$${totalGanancia.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📊 Margen</div><div class="kpi-value">${margen.toFixed(1)}%</div></div>
+                </div>
+                <div class="stats-kpi-grid" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+                    <div class="kpi-card"><div class="kpi-title">📈 Ganancia semanal</div><div class="kpi-value">$${ganSemana.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📈 Ganancia mensual</div><div class="kpi-value">$${ganMes.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💰 Ventas semanales</div><div class="kpi-value">$${venSemana.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💰 Ventas mensuales</div><div class="kpi-value">$${venMes.toFixed(2)}</div></div>
+                </div>
+                <div class="charts-grid" style="margin-bottom:16px;">
+                    <div class="chart-container"><h4>📈 Ganancia diaria</h4><canvas id="cigGanLineChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>🏆 Ganancia por marca</h4><canvas id="cigGanBarChart" width="400" height="200"></canvas></div>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <h4>🏆 Ganancia por marca</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Marca</th><th>Unidades</th><th>Ventas</th><th>Ganancia</th><th>Margen</th></tr></thead>
+                            <tbody>${marcasArr.map(([marca, d]) => `<tr><td>${escapeHtml(marca)}</td><td>${d.unidades}</td><td>$${d.ventas.toFixed(2)}</td><td>$${d.ganancia.toFixed(2)}</td><td>${d.ventas > 0 ? (d.ganancia/d.ventas*100).toFixed(1) : '0'}%</td></tr>`).join('')}</tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <h4>📊 Rentabilidad por proveedor</h4>
+                    <div class="table-responsive">
+                        <table class="table"><thead><tr><th>Proveedor</th><th>Ventas</th><th>Ganancia</th><th>Margen</th></tr></thead>
+                            <tbody>${Object.entries(provMap).sort((a,b) => b[1].ganancia - a[1].ganancia).map(([prov, d]) => `<tr><td>${escapeHtml(prov)}</td><td>$${d.ventas.toFixed(2)}</td><td>$${d.ganancia.toFixed(2)}</td><td>${d.margen.toFixed(1)}%</td></tr>`).join('')}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            [7,30,90,99999].forEach((d,i) => {
+                const ids = ['cigGan7','cigGan30','cigGan90','cigGanAll'];
+                const el = document.getElementById(ids[i]);
+                if (el) el.onclick = () => { localStorage.setItem('cigGananciaPeriod', d); renderCigarrillos(); };
+            });
+
+            if (window._cigGanLineChart) window._cigGanLineChart.destroy();
+            const ctxLine = document.getElementById('cigGanLineChart')?.getContext('2d');
+            if (ctxLine) window._cigGanLineChart = new Chart(ctxLine, {
+                type: 'line', data: { labels, datasets: [
+                    { label: 'Ventas ($)', data: ventasDiarias, borderColor: '#d63384', backgroundColor: 'rgba(214,51,132,0.1)', tension: 0.3, fill: true },
+                    { label: 'Ganancia ($)', data: gananciasDiarias, borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.3, fill: true }
+                ]}, options: { responsive: true, maintainAspectRatio: true }
+            });
+
+            if (window._cigGanBarChart) window._cigGanBarChart.destroy();
+            const ctxBar = document.getElementById('cigGanBarChart')?.getContext('2d');
+            if (ctxBar) window._cigGanBarChart = new Chart(ctxBar, {
+                type: 'bar', data: {
+                    labels: marcasArr.slice(0, 8).map(([m]) => m),
+                    datasets: [
+                        { label: 'Ganancia ($)', data: marcasArr.slice(0, 8).map(([,d]) => d.ganancia), backgroundColor: '#10b981' },
+                        { label: 'Ventas ($)', data: marcasArr.slice(0, 8).map(([,d]) => d.ventas), backgroundColor: '#d63384' }
+                    ]
+                }, options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: true } } }
+            });
+        }
+
+        // ---------- ESTADÍSTICAS ----------
+        function renderCigEstadisticasSection(cigProducts, cigVentas) {
+            const cigIds = cigProducts.map(p => p.id);
+            const periodo = parseInt(localStorage.getItem('cigStatsPeriod2') || '30');
+            const fechaInicio = new Date(); fechaInicio.setDate(fechaInicio.getDate() - periodo); fechaInicio.setHours(0,0,0,0);
+            const ventasFilt = cigVentas.filter(v => new Date(v.fecha) >= fechaInicio);
+
+            // Marcas más vendidas
+            let brandUnits = {};
+            let brandSales = {};
+            ventasFilt.forEach(v => {
+                v.items.forEach(item => {
+                    if (cigIds.includes(item.id) || esItemCigarrillo(item)) {
+                        const p = productos.find(pr => pr.id === item.id);
+                        const marca = (p && p.marca) ? p.marca : (p ? p.nombre : item.nombre);
+                        brandUnits[marca] = (brandUnits[marca] || 0) + item.cantidad;
+                        brandSales[marca] = (brandSales[marca] || 0) + item.subtotal;
+                    }
+                });
+            });
+            const topBrands = Object.entries(brandUnits).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+            // Productos sin movimiento
+            const movedProdIds = new Set();
+            ventasFilt.forEach(v => v.items.forEach(item => { if (cigIds.includes(item.id)) movedProdIds.add(item.id); }));
+            const sinMovimiento = cigProducts.filter(p => !movedProdIds.has(p.id));
+
+            // Horas más ventas
+            let hourSales = new Array(24).fill(0);
+            let hourCount = new Array(24).fill(0);
+            ventasFilt.forEach(v => {
+                const h = new Date(v.fecha).getHours();
+                hourSales[h] += v.total;
+                hourCount[h]++;
+            });
+            const peakHour = hourSales.indexOf(Math.max(...hourSales));
+
+            // Días con mayores ventas
+            let daySales = {};
+            ventasFilt.forEach(v => {
+                const d = toLocalDateStr(new Date(v.fecha));
+                daySales[d] = (daySales[d] || 0) + v.total;
+            });
+            const topDays = Object.entries(daySales).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+            // Mes actual vs anterior
+            const now = new Date();
+            const mesActual = now.getMonth();
+            const anoActual = now.getFullYear();
+            const mesAnt = mesActual === 0 ? 11 : mesActual - 1;
+            const anoAnt = mesActual === 0 ? anoActual - 1 : anoActual;
+            const ventasMesActual = cigVentas.filter(v => {
+                const d = new Date(v.fecha); return d.getMonth() === mesActual && d.getFullYear() === anoActual && !v.devuelta;
+            }).reduce((s, v) => s + v.total, 0);
+            const ventasMesAnt = cigVentas.filter(v => {
+                const d = new Date(v.fecha); return d.getMonth() === mesAnt && d.getFullYear() === anoAnt && !v.devuelta;
+            }).reduce((s, v) => s + v.total, 0);
+            const diffMes = ventasMesActual - ventasMesAnt;
+            const pctMes = ventasMesAnt > 0 ? (diffMes / ventasMesAnt * 100) : 0;
+
+            // Días de la semana
+            const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+            let dayOfWeekSales = new Array(7).fill(0);
+            ventasFilt.forEach(v => { dayOfWeekSales[new Date(v.fecha).getDay()] += v.total; });
+
+            const html = `
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                    <button id="cigEst7" class="btn ${periodo===7?'btn-primary':'btn-outline'}">7d</button>
+                    <button id="cigEst30" class="btn ${periodo===30?'btn-primary':'btn-outline'}">30d</button>
+                    <button id="cigEst90" class="btn ${periodo===90?'btn-primary':'btn-outline'}">90d</button>
+                    <button id="cigEstAll" class="btn ${periodo===99999?'btn-primary':'btn-outline'}">Todo</button>
+                </div>
+                <div class="stats-kpi-grid" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+                    <div class="kpi-card"><div class="kpi-title">⏰ Hora pico</div><div class="kpi-value">${peakHour}:00 hs</div></div>
+                    <div class="kpi-card"><div class="kpi-title">📅 Mes actual vs anterior</div><div class="kpi-value" style="color:${diffMes >= 0 ? 'var(--success)' : 'var(--danger)'}">${pctMes >= 0 ? '+' : ''}${pctMes.toFixed(1)}%</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💰 Mes actual</div><div class="kpi-value">$${ventasMesActual.toFixed(2)}</div></div>
+                    <div class="kpi-card"><div class="kpi-title">💰 Mes anterior</div><div class="kpi-value">$${ventasMesAnt.toFixed(2)}</div></div>
+                </div>
+                <div class="charts-grid" style="margin-bottom:16px;">
+                    <div class="chart-container"><h4>📈 Tendencia de ventas</h4><canvas id="cigEstLineChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>⏰ Ventas por hora</h4><canvas id="cigEstHourChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>📅 Ventas por día de semana</h4><canvas id="cigEstDayChart" width="400" height="200"></canvas></div>
+                    <div class="chart-container"><h4>🏆 Top marcas (unidades)</h4><canvas id="cigEstBrandChart" width="400" height="200"></canvas></div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+                    <div>
+                        <h4>🏆 Top marcas más vendidas</h4>
+                        <div class="table-responsive">
+                            <table class="table"><thead><tr><th>Marca</th><th>Unidades</th><th>Ventas</th></tr></thead>
+                                <tbody>${topBrands.map(([m, u]) => `<tr><td>${escapeHtml(m)}</td><td>${u}</td><td>$${(brandSales[m]||0).toFixed(2)}</td></tr>`).join('')}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div>
+                        <h4>📅 Top 10 días con mayores ventas</h4>
+                        <div class="table-responsive">
+                            <table class="table"><thead><tr><th>Fecha</th><th>Ventas</th></tr></thead>
+                                <tbody>${topDays.map(([d, s]) => `<tr><td>${d}</td><td>$${(s||0).toFixed(2)}</td></tr>`).join('')}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                ${sinMovimiento.length ? `<div style="background:var(--surface2);border-radius:12px;padding:14px;margin-bottom:16px;"><h4>⚠️ Productos sin movimiento (${sinMovimiento.length})</h4><p>${sinMovimiento.map(p => escapeHtml(p.nombre)).join(', ')}</p></div>` : ''}
+            `;
+            document.getElementById("cigSubContent").innerHTML = html;
+            [7,30,90,99999].forEach((d,i) => {
+                const ids = ['cigEst7','cigEst30','cigEst90','cigEstAll'];
+                const el = document.getElementById(ids[i]);
+                if (el) el.onclick = () => { localStorage.setItem('cigStatsPeriod2', d); renderCigarrillos(); };
+            });
+
+            // Charts
+            const sortedVentas = ventasFilt.slice().sort((a,b) => new Date(a.fecha) - new Date(b.fecha));
+            let fechasMap = new Map();
+            for (let d = new Date(fechaInicio); d <= new Date(); d.setDate(d.getDate()+1)) fechasMap.set(d.toISOString().split('T')[0], 0);
+            sortedVentas.forEach(v => { const k = new Date(v.fecha).toISOString().split('T')[0]; if (fechasMap.has(k)) fechasMap.set(k, fechasMap.get(k) + v.total); });
+            const sortedDates = Array.from(fechasMap.keys()).sort();
+            const ventasData = sortedDates.map(d => fechasMap.get(d));
+            const lbls = sortedDates.map(d => new Date(d).toLocaleDateString('es', {day:'numeric',month:'short'}));
+
+            if (window._cigEstLineChart) window._cigEstLineChart.destroy();
+            const ctxL = document.getElementById('cigEstLineChart')?.getContext('2d');
+            if (ctxL) window._cigEstLineChart = new Chart(ctxL, { type: 'line', data: { labels: lbls, datasets: [{ label: 'Ventas ($)', data: ventasData, borderColor: '#d63384', tension: 0.3, fill: true, backgroundColor: 'rgba(214,51,132,0.1)' }] }, options: { responsive: true, maintainAspectRatio: true } });
+
+            if (window._cigEstHourChart) window._cigEstHourChart.destroy();
+            const ctxH = document.getElementById('cigEstHourChart')?.getContext('2d');
+            if (ctxH) window._cigEstHourChart = new Chart(ctxH, { type: 'bar', data: { labels: Array.from({length:24},(_,i)=>i+':00'), datasets: [{ label: 'Ventas ($)', data: hourSales, backgroundColor: '#d63384' }] }, options: { responsive: true, maintainAspectRatio: true } });
+
+            if (window._cigEstDayChart) window._cigEstDayChart.destroy();
+            const ctxD = document.getElementById('cigEstDayChart')?.getContext('2d');
+            if (ctxD) window._cigEstDayChart = new Chart(ctxD, { type: 'bar', data: { labels: dayNames, datasets: [{ label: 'Ventas ($)', data: dayOfWeekSales, backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: true } });
+
+            if (window._cigEstBrandChart) window._cigEstBrandChart.destroy();
+            const ctxB = document.getElementById('cigEstBrandChart')?.getContext('2d');
+            if (ctxB) window._cigEstBrandChart = new Chart(ctxB, { type: 'bar', data: { labels: topBrands.slice(0, 8).map(([m]) => m), datasets: [{ label: 'Unidades', data: topBrands.slice(0, 8).map(([,u]) => u), backgroundColor: '#10b981' }] }, options: { responsive: true, maintainAspectRatio: true } });
+        }
+
+        // ---------- EXPOSE TO GLOBAL (module scope → window) ----------
+        window.renderCigarrillos = renderCigarrillos;
+        window.esItemCigarrillo = esItemCigarrillo;
+        window.getCigConfig = getCigConfig;
+        window.actualizarCigCajaSaldo = actualizarCigCajaSaldo;
+        window.saveCigCaja = saveCigCaja;
+        window.saveCigCompras = saveCigCompras;
+        window.saveCigMovimientosStock = saveCigMovimientosStock;
+        window.tieneProductosCigarrillos = tieneProductosCigarrillos;
+        window.getProductosCigarrillos = getProductosCigarrillos;
+        window.getVentasCigarrillos = getVentasCigarrillos;
+        window.getCigStock = getCigStock;
+        window.getTotalAtados = getTotalAtados;
+        window.productHasMinStock = productHasMinStock;
+        window.abrirCigCaja = abrirCigCaja;
+        window.cerrarCigCajaConArqueo = cerrarCigCajaConArqueo;
+        window.transferirCigACajaGeneral = transferirCigACajaGeneral;
+        window.cigCajaTieneMovsHoy = cigCajaTieneMovsHoy;
+
+        // ---------- CHARTS (shared) ----------
+        function renderCigCharts(cigVentas, cigProducts, dias) {
+            const ahora = new Date();
+            const fechaInicio = new Date(); fechaInicio.setDate(ahora.getDate() - dias); fechaInicio.setHours(0,0,0,0);
+            const ventasFiltradas = cigVentas.filter(v => new Date(v.fecha) >= fechaInicio).sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+            const cigIds = cigProducts.map(p => p.id);
+            let fechasMap = new Map();
+            for (let d = new Date(fechaInicio); d <= ahora; d.setDate(d.getDate() + 1)) fechasMap.set(d.toISOString().split('T')[0], { ventas: 0, ganancia: 0 });
+            ventasFiltradas.forEach(v => {
+                let key = new Date(v.fecha).toISOString().split('T')[0];
+                if (fechasMap.has(key)) { let item = fechasMap.get(key); let ct = v.desglose ? v.desglose.cigarrillos : v.total; item.ventas += ct; item.ganancia += v.ganancia || 0; }
+            });
+            let sortedDates = Array.from(fechasMap.keys()).sort();
+            let ventasData = sortedDates.map(d => fechasMap.get(d).ventas);
+            let labels = sortedDates.map(d => new Date(d).toLocaleDateString('es', { day: 'numeric', month: 'short' }));
+            if (window._cigLineChart) window._cigLineChart.destroy();
+            let ctxLine = document.getElementById('cigLineChart')?.getContext('2d');
+            if (ctxLine) window._cigLineChart = new Chart(ctxLine, { type: 'line', data: { labels, datasets: [{ label: 'Ventas cigarrillos ($)', data: ventasData, borderColor: '#d63384', backgroundColor: 'rgba(214,51,132,0.1)', tension: 0.3, fill: true }] }, options: { responsive: true, maintainAspectRatio: true } });
+            let metodos = {};
+            ventasFiltradas.forEach(v => { let met = v.metodoPago || 'efectivo'; let monto = v.desglose ? v.desglose.cigarrillos : v.total; metodos[met] = (metodos[met] || 0) + monto; });
+            let pieLabels = Object.keys(metodos), pieData = Object.values(metodos);
+            if (window._cigPieChart) window._cigPieChart.destroy();
+            let ctxPie = document.getElementById('cigPieChart')?.getContext('2d');
+            if (ctxPie) window._cigPieChart = new Chart(ctxPie, { type: 'pie', data: { labels: pieLabels, datasets: [{ data: pieData, backgroundColor: ['#d63384','#ffab00','#10b981','#3b82f6','#8b5cf6'] }] }, options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { position: 'bottom' } } } });
+            let prodMap = new Map();
+            ventasFiltradas.forEach(v => { v.items.forEach(item => { if (cigIds.includes(item.id) || esItemCigarrillo(item)) prodMap.set(item.nombre, (prodMap.get(item.nombre) || 0) + item.cantidad); }); });
+            let topProd = Array.from(prodMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            if (window._cigBarChart) window._cigBarChart.destroy();
+            let ctxBar = document.getElementById('cigBarChart')?.getContext('2d');
+            if (ctxBar) window._cigBarChart = new Chart(ctxBar, { type: 'bar', data: { labels: topProd.map(p => p[0]), datasets: [{ label: 'Unidades', data: topProd.map(p => p[1]), backgroundColor: '#d63384' }] }, options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: true } } } });
+            let gananciasData = sortedDates.map(d => fechasMap.get(d).ganancia);
+            if (window._cigDualChart) window._cigDualChart.destroy();
+            let ctxDual = document.getElementById('cigDualChart')?.getContext('2d');
+            if (ctxDual) window._cigDualChart = new Chart(ctxDual, { type: 'bar', data: { labels, datasets: [{ label: 'Ventas cigarrillos ($)', data: ventasData, backgroundColor: '#d63384' }, { label: 'Ganancia ($)', data: gananciasData, backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: true, scales: { y: { beginAtZero: true } } } });
+        }
+
         window.addEventListener('load', () => {
             // Solo carga datos de Firebase si NO hay datos locales,
             // para evitar borrar lo que el usuario ya guardó
@@ -10302,10 +11517,12 @@ function refreshCurrentTab() {
                 if (!snapshot.exists()) return;
                 const fbData = snapshot.val();
                 let changed = false;
-                const keys = ['clientes','productos','ventas','caja','negocio','config','categorias','empleados','turnos','auditoriaBorrados','carteles','plantillasCarteles','etiquetasGuardadas','turnosCaja','gastos','proveedores'];
+                const keys = ['clientes','productos','ventas','caja','negocio','config','categorias','empleados','turnos','auditoriaBorrados','carteles','plantillasCarteles','etiquetasGuardadas','turnosCaja','gastos','proveedores','cigCaja','cigCompras','cigMovimientosStock','subeCargas'];
                 keys.forEach(k => {
                     if (!localStorage.getItem(pref + k) && fbData[k]) {
-                        if (Array.isArray(window[k])) {
+                        if (k === 'caja' && window.caja && window.caja.cerradaEn) {
+                            // No restaurar caja si fue cerrada localmente
+                        } else if (Array.isArray(window[k])) {
                             window[k].splice(0, window[k].length, ...fbData[k]);
                         } else if (typeof window[k] === 'object' && window[k] !== null) {
                             Object.assign(window[k], fbData[k]);
@@ -10323,6 +11540,129 @@ function refreshCurrentTab() {
                 }
             }).catch(err => console.warn("Firebase read error:", err));
         });
+    </script>
+
+    <!-- ===== MÓDULO SUBE (Carga virtual) ===== -->
+    <script>
+        function renderSube() {
+            const hoy = new Date().toISOString().split('T')[0];
+            const cargasHoy = subeCargas.filter(c => c.fecha === hoy);
+            const totalCargasHoy = cargasHoy.reduce((s, c) => s + c.monto, 0);
+            const totalComisionesHoy = cargasHoy.reduce((s, c) => s + (c.comision || 0), 0);
+            const totalGral = subeCargas.reduce((s, c) => s + c.monto + (c.comision || 0), 0);
+            const totalComisionesGral = subeCargas.reduce((s, c) => s + (c.comision || 0), 0);
+            const totalOperaciones = subeCargas.length;
+            const metodoMap = { efectivo: 'Efectivo', transferencia: 'Transferencia', debito: 'Débito', credito: 'Crédito', otros: 'Otros' };
+
+            const html = `
+                <div class="page-header"><h2>💳 SUBE · Carga Virtual</h2><span class="badge badge-info" style="background:linear-gradient(135deg,#0099ff,#6633cc);color:#fff;border:none;">${totalOperaciones} operaciones</span></div>
+
+                <div class="stats-grid">
+                    <div class="stat-card"><span class="stat-number" style="color:#0099ff;">$${totalCargasHoy.toFixed(2)}</span><span class="stat-label">Cargas hoy</span></div>
+                    <div class="stat-card"><span class="stat-number" style="color:#10b981;">+$${totalComisionesHoy.toFixed(2)}</span><span class="stat-label">Comisiones hoy</span></div>
+                    <div class="stat-card"><span class="stat-number">${cargasHoy.length}</span><span class="stat-label">Operaciones hoy</span></div>
+                    <div class="stat-card"><span class="stat-number" style="color:#f59e0b;">$${totalGral.toFixed(2)}</span><span class="stat-label">Total acumulado</span></div>
+                    <div class="stat-card"><span class="stat-number" style="color:#10b981;">$${totalComisionesGral.toFixed(2)}</span><span class="stat-label">Comisiones totales</span></div>
+                    <div class="stat-card"><span class="stat-number">${totalOperaciones}</span><span class="stat-label">Total operaciones</span></div>
+                </div>
+
+                <div class="mod-section">
+                    <div class="mod-section-header"><div class="mod-icon-circle">➕</div><div><h3>Nueva carga SUBE</h3></div></div>
+                    <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr auto;">
+                        <div class="form-group"><label>💰 Monto carga ($)</label><input id="subeMonto" class="form-input" type="number" step="0.01" min="0" value="0"></div>
+                        <div class="form-group"><label>💵 Comisión ($)</label><input id="subeComision" class="form-input" type="number" step="0.01" min="0" value="0"></div>
+                        <div class="form-group"><label>💳 Método pago</label><select id="subeMetodo" class="form-input"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="debito">Débito</option><option value="credito">Crédito</option><option value="otros">Otros</option></select></div>
+                        <div class="form-group" style="align-self:end;"><button id="subeCargarBtn" class="btn btn-primary">➕ Cargar</button></div>
+                        <div class="form-group" style="grid-column:1/-1;"><label>👤 Cliente (opcional)</label><input id="subeCliente" class="form-input" placeholder="Nombre del cliente"></div>
+                    </div>
+                </div>
+
+                <div class="mod-section">
+                    <div class="mod-section-header"><div class="mod-icon-circle">📋</div><div><h3>Historial</h3></div></div>
+                    <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+                        <input id="subeFechaFilter" class="form-input" type="date" value="${hoy}" style="width:auto;">
+                        <button class="btn btn-outline" onclick="document.getElementById('subeFechaFilter').value='';renderSube();">📅 Todas</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead><tr><th>Fecha</th><th>Cliente</th><th>Monto</th><th>Comisión</th><th>Total</th><th>Método</th><th></th></tr></thead>
+                            <tbody>${(() => {
+                                let filtro = document.getElementById('subeFechaFilter')?.value;
+                                let items = filtro ? subeCargas.filter(c => c.fecha === filtro) : [...subeCargas].reverse();
+                                if (!items.length) return '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);">Sin operaciones</td></tr>';
+                                return items.slice().reverse().map(c => `
+                                    <tr>
+                                        <td style="font-size:0.78rem;">${new Date(c.fecha+'T00:00:00').toLocaleDateString('es',{day:'numeric',month:'short'})}</td>
+                                        <td>${escapeHtml(c.cliente || '—')}</td>
+                                        <td>$${c.monto.toFixed(2)}</td>
+                                        <td style="color:#10b981;">+$${(c.comision||0).toFixed(2)}</td>
+                                        <td><strong>$${(c.monto + (c.comision||0)).toFixed(2)}</strong></td>
+                                        <td><span class="badge badge-info" style="background:var(--surface2);">${metodoMap[c.metodoPago]||c.metodoPago}</span></td>
+                                        <td><button class="btn btn-sm btn-outline sube-anular-btn" data-id="${c.id}">✕</button></td>
+                                    </tr>
+                                `).join('');
+                            })()}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            document.getElementById('sube').innerHTML = html;
+            document.getElementById('subeCargarBtn')?.addEventListener('click', registrarCargaSube);
+            document.getElementById('subeFechaFilter')?.addEventListener('change', () => renderSube());
+            document.getElementById('sube')?.addEventListener('click', (e) => {
+                const btn = e.target.closest('.sube-anular-btn');
+                if (btn && confirm('¿Anular esta carga SUBE?')) {
+                    anularCargaSube(parseInt(btn.dataset.id));
+                }
+            });
+        }
+
+        function registrarCargaSube() {
+            const montoInput = document.getElementById('subeMonto');
+            const comisionInput = document.getElementById('subeComision');
+            const metodoInput = document.getElementById('subeMetodo');
+            const clienteInput = document.getElementById('subeCliente');
+            if (!montoInput || !comisionInput || !metodoInput) {
+                toast('Error: no se encontraron los campos del formulario SUBE', true);
+                return;
+            }
+            const monto = parseFloat(montoInput.value) || 0;
+            const comision = parseFloat(comisionInput.value) || 0;
+            const metodoPago = metodoInput.value || 'efectivo';
+            const cliente = (clienteInput?.value || '').trim();
+            if (monto <= 0) { toast('Ingresá un monto válido mayor a 0', true); return; }
+            const carga = { id: Date.now(), fecha: new Date().toISOString().split('T')[0], monto, comision, metodoPago, cliente };
+            subeCargas.push(carga);
+            // Registrar en caja general
+            if (typeof caja !== 'undefined' && caja && caja.apertura) {
+                caja.movimientos.push({ fecha: new Date().toISOString(), tipo: 'ingreso', monto: monto + comision, descripcion: `Carga SUBE ($${monto} + $${comision} com.)`, metodo: metodoPago });
+                if (typeof actualizarSaldoCaja === 'function') actualizarSaldoCaja();
+            }
+            renderSube();
+            saveAll();
+            const nMonto = document.getElementById('subeMonto');
+            const nComision = document.getElementById('subeComision');
+            const nCliente = document.getElementById('subeCliente');
+            if (nMonto) { nMonto.value = '0'; setTimeout(() => nMonto.focus(), 100); }
+            if (nComision) nComision.value = '0';
+            if (nCliente) nCliente.value = '';
+            toast('Carga realizada por $' + monto.toFixed(2) + (comision > 0 ? ' (comisión $' + comision.toFixed(2) + ')' : ''));
+        }
+
+        function anularCargaSube(id) {
+            const idx = subeCargas.findIndex(c => c.id === id);
+            if (idx === -1) return;
+            const carga = subeCargas[idx];
+            subeCargas.splice(idx, 1);
+            // Reversar movimiento en caja
+            if (caja.apertura) {
+                caja.movimientos.push({ fecha: new Date().toISOString(), tipo: 'retiro', monto: carga.monto + (carga.comision || 0), descripcion: `Anulación carga SUBE #${id}`, metodo: carga.metodoPago });
+                actualizarSaldoCaja();
+            }
+            saveAll();
+            renderSube();
+            toast('🗑️ Carga SUBE anulada');
+        }
     </script>
 </body>
 </html>
